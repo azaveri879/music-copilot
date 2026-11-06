@@ -24,6 +24,7 @@ export interface AudioFeatures {
   dynamic_range_db: number | null;
   spectral_centroid_mean: number | null;
   onset_strength_mean: number | null;
+  timing_checked: boolean;
   timing_issues: TimingIssue[];
   frequency_profile: FrequencyProfile | null;
 }

@@ -1,10 +1,19 @@
 import json
+import logging
+
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
+
 from models.schemas import ChatRequest
-from services.ai_service import stream_chat_response
+from services.ai_service import ChatError, stream_chat_response
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
 
 
 @router.post("/chat")
@@ -17,12 +26,13 @@ async def chat_endpoint(request: ChatRequest):
                 region=request.region,
                 history=request.history,
             ):
-                payload = json.dumps({"type": "delta", "content": chunk})
-                yield f"data: {payload}\n\n"
-            yield "data: [DONE]\n\n"
-        except Exception as e:
-            error_payload = json.dumps({"type": "error", "content": str(e)})
-            yield f"data: {error_payload}\n\n"
+                yield sse({"type": "delta", "content": chunk})
+            yield sse({"type": "done"})
+        except ChatError as exc:
+            yield sse({"type": "error", "content": str(exc)})
+        except Exception:
+            logger.exception("Chat stream failed")
+            yield sse({"type": "error", "content": "Something went wrong generating a response."})
 
     return StreamingResponse(
         event_stream(),

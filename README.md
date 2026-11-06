@@ -67,7 +67,7 @@ The goal isn't to replace the producer's creative judgment — it's to collapse 
 - **Audio Upload & Waveform Visualization** — Upload a full mix or a bounced stem. Scrub through it and select specific regions for analysis.
 - **Region Selection** — Click and drag on the waveform to highlight a specific section ("just this chorus", "bars 8–12"). The copilot responds with advice scoped to that region.
 - **Natural Language Input** — Describe what's wrong or what you want in plain English. "This feels off beat", "I want this to sound like it's underwater", "the vocals are too harsh."
-- **AI-Powered Analysis** — The backend analyzes your audio for timing, pitch, frequency content, dynamics, and more — then feeds that structured data to the AI layer.
+- **AI-Powered Analysis** — The backend analyzes your audio for tempo, timing, key, frequency content, loudness and dynamics, then feeds that structured data to the AI layer. Selecting a region re-runs the analysis for just that section.
 - **Specific, Actionable Advice** — Responses include the specific Logic Pro steps, plugin recommendations, and parameter ranges to get the result you're after. Not "try adding some reverb" — "add Space Designer, set the room size to ~40%, roll off the highs above 8kHz."
 - **Session Context** — The panel remembers what you've talked about in the session, so follow-up questions work naturally ("now do the same for the chorus").
 - **Streaming Responses** — Answers stream in token by token so the interaction feels fast and conversational.
@@ -120,10 +120,11 @@ The goal isn't to replace the producer's creative judgment — it's to collapse 
 1. User uploads audio file (full mix or specific section)
 2. Frontend sends file to `POST /analyze` → backend extracts audio features
 3. Structured features (BPM, key, spectral data, timing issues, etc.) are stored in session state
-4. User types a natural language query in the chat panel
-5. Frontend sends `POST /chat` with the query + session context (prior messages + audio features)
-6. Backend constructs a rich prompt with audio analysis data and streams Claude's response back via SSE
-7. Frontend renders the streaming response in the chat panel
+4. Selecting a region sends the file to `POST /analyze` again with `start_time` / `end_time`. Tempo and the beat grid still come from the whole track; everything else describes the region
+5. User types a natural language query in the chat panel
+6. Frontend sends `POST /chat` with the query + session context (prior messages + audio features)
+7. Backend constructs a rich prompt with audio analysis data and streams Claude's response back via SSE
+8. Frontend renders the streaming response in the chat panel
 
 ---
 
@@ -138,6 +139,7 @@ The goal isn't to replace the producer's creative judgment — it's to collapse 
 ### Backend
 - **FastAPI** — Async Python API framework
 - **librosa** — Audio analysis (BPM detection, pitch, spectral features, onset detection)
+- **pyloudnorm** — ITU-R BS.1770 integrated loudness (LUFS)
 - **numpy / scipy** — Signal processing
 - **Anthropic Python SDK** — Claude API with streaming
 - **uvicorn** — ASGI server
@@ -155,7 +157,6 @@ music-copilot/
 ├── .gitignore
 │
 ├── frontend/
-│   ├── public/
 │   ├── src/
 │   │   ├── components/
 │   │   │   ├── WaveformPlayer.tsx      # Audio upload, waveform display, region selection
@@ -168,10 +169,13 @@ music-copilot/
 │   │   ├── types/
 │   │   │   └── index.ts               # Shared TypeScript types
 │   │   ├── utils/
-│   │   │   └── api.ts                 # API client functions
+│   │   │   ├── api.ts                 # API client functions
+│   │   │   └── format.ts              # Time formatting
 │   │   ├── App.tsx                    # Root component, layout
 │   │   └── main.tsx                   # Entry point
+│   ├── index.html
 │   ├── package.json
+│   ├── postcss.config.js
 │   ├── tsconfig.json
 │   ├── vite.config.ts
 │   └── tailwind.config.js
@@ -179,15 +183,16 @@ music-copilot/
 └── backend/
     ├── main.py                        # FastAPI app entry point, CORS, router registration
     ├── routes/
-    │   ├── analyze.py                 # POST /analyze — audio upload and feature extraction
+    │   ├── analyze.py                 # POST /analyze and /preview — feature extraction, AIFF playback
     │   └── chat.py                    # POST /chat — AI response with streaming SSE
     ├── services/
     │   ├── audio_analysis.py          # librosa-based audio feature extraction
     │   └── ai_service.py             # Claude API client, prompt construction, streaming
     ├── models/
     │   └── schemas.py                 # Pydantic request/response models
-    ├── pyproject.toml
-    └── requirements.txt
+    ├── tests/                         # pytest suite (synthetic audio, stubbed Claude API)
+    ├── requirements.txt
+    └── requirements-dev.txt
 ```
 
 ---
@@ -197,11 +202,8 @@ music-copilot/
 ### Prerequisites
 
 - **Node.js** v18+ and **npm** or **pnpm**
-- **Python** 3.10+
+- **Python** 3.12+
 - An **Anthropic API key** — get one at [console.anthropic.com](https://console.anthropic.com)
-- **ffmpeg** — required by librosa for audio decoding
-  - macOS: `brew install ffmpeg`
-  - Ubuntu: `sudo apt install ffmpeg`
 
 ---
 
@@ -212,12 +214,15 @@ music-copilot/
 cd music-copilot/backend
 
 # Create and activate a virtual environment
-python -m venv venv
+python3 -m venv venv
 source venv/bin/activate       # macOS/Linux
 # venv\Scripts\activate        # Windows
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Add your API key (see Environment Variables)
+cp .env.example .env
 
 # Start the development server
 uvicorn main:app --reload --port 8000
@@ -257,11 +262,25 @@ CORS_ORIGINS=http://localhost:5173
 MAX_FILE_SIZE_MB=50
 ```
 
-#### Frontend — create `frontend/.env`
+#### Frontend — create `frontend/.env` (optional)
 
 ```env
 VITE_API_BASE_URL=http://localhost:8000
 ```
+
+`MAX_FILE_SIZE_MB` caps uploads. At the default of 50, a 24-bit stereo WAV tops out around three minutes, so raise it for full-length bounces.
+
+---
+
+### Running the Tests
+
+```bash
+cd backend
+pip install -r requirements-dev.txt
+pytest
+```
+
+The suite needs no API key. It generates its own audio and runs the Anthropic SDK against a local stand-in for the API.
 
 ---
 
@@ -281,7 +300,9 @@ VITE_API_BASE_URL=http://localhost:8000
 
 4. **Get specific advice** — The copilot analyzes your audio, understands the context of your question, and responds with actionable steps — specific to Logic Pro, specific to your file.
 
-5. **Follow up** — The session remembers everything. Ask follow-up questions naturally: *"Now do the same thing for bars 24–32"* or *"What if I wanted a warmer sound instead?"*
+5. **Adjust the layout** — Drag the divider beside the chat panel to widen or narrow it, or focus it and use the arrow keys. Double-click to reset. Your width is remembered.
+
+6. **Follow up** — The session remembers everything. Ask follow-up questions naturally: *"Now do the same thing for bars 24–32"* or *"What if I wanted a warmer sound instead?"*
 
 ---
 
@@ -292,9 +313,15 @@ VITE_API_BASE_URL=http://localhost:8000
 Accepts an audio file upload. Returns structured audio features.
 
 **Request:** `multipart/form-data`
-- `file`: audio file (`.wav`, `.mp3`, `.aiff`, `.flac`)
+- `file`: audio file (`.wav`, `.mp3`, `.aiff`, `.aif`, `.flac`)
 - `start_time` *(optional)*: float, start of region in seconds
 - `end_time` *(optional)*: float, end of region in seconds
+
+`timing_issues` are candidates to check by ear. They're measured against a grid at the single tempo that best fits the track. If no steady tempo fits, `timing_checked` is `false` and no issues are reported, rather than guessing against an unreliable grid. Notes near the midpoint between grid lines and unusually quiet attacks are left out, and an exact digital loop reports each spot once.
+
+With a region, `bpm` and the beat grid come from the whole track. `timing_issues` are limited to the region, with timestamps as positions in the file. All other fields describe the region. Fields that can't be measured, such as loudness on a clip under 400ms or anything on silence, are `null`.
+
+**Errors:** `400` for an unsupported type, undecodable audio or an invalid region; `413` for a file over `MAX_FILE_SIZE_MB`.
 
 **Response:**
 ```json
@@ -308,8 +335,9 @@ Accepts an audio file upload. Returns structured audio features.
   "dynamic_range_db": 8.1,
   "spectral_centroid_mean": 2340.5,
   "onset_strength_mean": 0.43,
+  "timing_checked": true,
   "timing_issues": [
-    { "timestamp": 3.21, "description": "Late transient detected (+38ms)" }
+    { "timestamp": 3.21, "description": "Onset ~38ms late against the beat grid" }
   ],
   "frequency_profile": {
     "low_energy": 0.42,
@@ -318,6 +346,12 @@ Accepts an audio file upload. Returns structured audio features.
   }
 }
 ```
+
+---
+
+### `POST /preview`
+
+Accepts the same `file` field as `/analyze` and returns a 16-bit WAV copy (`audio/wav`). The frontend uses it to draw and play AIFF files, which Chrome and Firefox can't decode.
 
 ---
 
@@ -346,17 +380,19 @@ data: {"type": "delta", "content": ", I can see a few timing issues..."}
 data: {"type": "done"}
 ```
 
+Failures after the stream has started arrive as `data: {"type": "error", "content": "..."}`.
+
 ---
 
 ## Roadmap
 
 ### v1 — Core Loop (current)
 - [x] Project scaffold and architecture
-- [ ] Audio upload and waveform rendering
-- [ ] Region selection UI
-- [ ] Backend audio analysis (librosa)
-- [ ] Chat panel with streaming responses
-- [ ] Session context (conversation memory within a session)
+- [x] Audio upload and waveform rendering
+- [x] Region selection UI
+- [x] Backend audio analysis (librosa)
+- [x] Chat panel with streaming responses
+- [x] Session context (conversation memory within a session)
 
 ### v2 — Deeper Analysis
 - [ ] Stem-aware analysis (upload individual tracks)
@@ -378,7 +414,7 @@ This is an early-stage project. If you're a producer or engineer who wants to sh
 
 ```bash
 # Clone the repo
-git clone https://github.com/yourusername/music-copilot.git
+git clone https://github.com/azaveri879/music-copilot.git
 cd music-copilot
 
 # Set up both environments (see Getting Started above)

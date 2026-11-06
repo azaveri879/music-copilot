@@ -1,5 +1,6 @@
-from pydantic import BaseModel
-from typing import Optional
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field
 
 
 class AudioRegion(BaseModel):
@@ -28,18 +29,19 @@ class AudioFeatures(BaseModel):
     dynamic_range_db: Optional[float] = None
     spectral_centroid_mean: Optional[float] = None
     onset_strength_mean: Optional[float] = None
+    timing_checked: bool = False  # False when the tempo isn't steady enough to judge timing against
     timing_issues: list[TimingIssue] = []
     frequency_profile: Optional[FrequencyProfile] = None
 
 
 class ChatHistoryItem(BaseModel):
-    role: str
+    role: Literal["user", "assistant"]
     content: str
 
 
 class ChatRequest(BaseModel):
     session_id: str
-    message: str
+    message: str = Field(min_length=1)
     audio_features: Optional[AudioFeatures] = None
     region: Optional[AudioRegion] = None
     history: list[ChatHistoryItem] = []
