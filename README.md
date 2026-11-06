@@ -1,0 +1,393 @@
+# 🎛️ Music Copilot
+
+> An AI-powered production assistant for musicians and producers — think Cursor for Logic Pro.
+
+Music Copilot is a companion app that sits alongside your DAW and helps you bridge the gap between the sound in your head and the production decisions that get you there. Upload a recording or a section of your session, describe what's wrong or what vibe you're going for, and get specific, actionable guidance — not generic tutorials.
+
+---
+
+## Table of Contents
+
+- [The Problem](#the-problem)
+- [The Vision](#the-vision)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Backend Setup](#backend-setup)
+  - [Frontend Setup](#frontend-setup)
+  - [Environment Variables](#environment-variables)
+- [Usage](#usage)
+- [API Reference](#api-reference)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+
+---
+
+## The Problem
+
+Most AI music tools are either fully generative (Suno, Udio) or narrowly focused (auto-mastering, stem separation). Nothing exists for the **musician-first producer** — someone who records real performances, has a clear creative vision, but struggles with the technical production layer.
+
+The gap looks like this:
+
+- You record a guitar part that feels slightly off beat but you don't know how to fix it in Logic
+- You want your track to feel "warm and lo-fi" but you don't know which plugins to reach for or what settings to use
+- You hear a reference track and want to understand what production decisions make it sound the way it does
+- You're mixing vocals and something feels off but you can't name what
+
+DAWs like Logic Pro are incredibly powerful but have steep learning curves. The documentation tells you *what* a tool does, not *when* or *why* to use it in context. Music Copilot fills that gap.
+
+---
+
+## The Vision
+
+**Logic Pro is the IDE. Music Copilot is the Cursor.**
+
+Just as Cursor transformed coding by making AI context-aware of your actual codebase, Music Copilot makes AI context-aware of your actual session. The parallel is tight:
+
+| Coding / Cursor | Music / Music Copilot |
+|---|---|
+| Code file | Audio session / stems |
+| Linter errors | Timing issues, clipping, off-key notes |
+| "Refactor this function" | "Fix the timing on bars 3–5" |
+| "Make this more readable" | "Make this feel warmer / more lo-fi" |
+| Cursor inline edits | Suggested Logic edits with exact steps |
+| Context-aware of the codebase | Context-aware of the session |
+
+The goal isn't to replace the producer's creative judgment — it's to collapse the gap between creative vision and technical execution.
+
+---
+
+## Features
+
+### v1 (Current)
+
+- **Audio Upload & Waveform Visualization** — Upload a full mix or a bounced stem. Scrub through it and select specific regions for analysis.
+- **Region Selection** — Click and drag on the waveform to highlight a specific section ("just this chorus", "bars 8–12"). The copilot responds with advice scoped to that region.
+- **Natural Language Input** — Describe what's wrong or what you want in plain English. "This feels off beat", "I want this to sound like it's underwater", "the vocals are too harsh."
+- **AI-Powered Analysis** — The backend analyzes your audio for timing, pitch, frequency content, dynamics, and more — then feeds that structured data to the AI layer.
+- **Specific, Actionable Advice** — Responses include the specific Logic Pro steps, plugin recommendations, and parameter ranges to get the result you're after. Not "try adding some reverb" — "add Space Designer, set the room size to ~40%, roll off the highs above 8kHz."
+- **Session Context** — The panel remembers what you've talked about in the session, so follow-up questions work naturally ("now do the same for the chorus").
+- **Streaming Responses** — Answers stream in token by token so the interaction feels fast and conversational.
+
+### Planned (v2+)
+
+- Reference track analysis ("make mine sound like this")
+- Stem-aware analysis (upload individual tracks, not just the mix)
+- Suggested settings exportable as Logic plugin presets
+- macOS companion app with native DAW integration via OSC/MIDI FX
+- Direct region handoff via keyboard shortcut (highlight in Logic → auto-appears in copilot)
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Frontend (React/TS)                   │
+│                                                              │
+│  ┌──────────────────┐    ┌──────────────────────────────┐   │
+│  │  WaveformPlayer  │    │         ChatPanel            │   │
+│  │  (Wavesurfer.js) │    │  - Message thread            │   │
+│  │  - Upload audio  │    │  - Streaming responses       │   │
+│  │  - Region select │───▶│  - Session context           │   │
+│  │  - Playback      │    │  - Natural language input    │   │
+│  └──────────────────┘    └──────────────────────────────┘   │
+│           │                           │                      │
+└───────────┼───────────────────────────┼──────────────────────┘
+            │                           │
+            ▼                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      Backend (FastAPI)                       │
+│                                                              │
+│  POST /analyze              POST /chat                       │
+│  ┌──────────────────┐      ┌──────────────────────────┐     │
+│  │  Audio Analysis  │      │     AI Service           │     │
+│  │  - librosa       │─────▶│     - Claude API         │     │
+│  │  - Timing/BPM    │      │     - Audio features     │     │
+│  │  - Pitch/key     │      │       as context         │     │
+│  │  - Frequency     │      │     - Streaming SSE      │     │
+│  │  - Dynamics      │      │     - Session memory     │     │
+│  └──────────────────┘      └──────────────────────────┘     │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Data Flow
+
+1. User uploads audio file (full mix or specific section)
+2. Frontend sends file to `POST /analyze` → backend extracts audio features
+3. Structured features (BPM, key, spectral data, timing issues, etc.) are stored in session state
+4. User types a natural language query in the chat panel
+5. Frontend sends `POST /chat` with the query + session context (prior messages + audio features)
+6. Backend constructs a rich prompt with audio analysis data and streams Claude's response back via SSE
+7. Frontend renders the streaming response in the chat panel
+
+---
+
+## Tech Stack
+
+### Frontend
+- **React 18** + **TypeScript** — Component framework
+- **Wavesurfer.js** — Waveform rendering, playback, and region selection
+- **Tailwind CSS** — Styling
+- **Vite** — Build tooling and dev server
+
+### Backend
+- **FastAPI** — Async Python API framework
+- **librosa** — Audio analysis (BPM detection, pitch, spectral features, onset detection)
+- **numpy / scipy** — Signal processing
+- **Anthropic Python SDK** — Claude API with streaming
+- **uvicorn** — ASGI server
+
+### AI
+- **Claude** (via Anthropic API) — The reasoning layer that translates audio features + natural language into production advice
+
+---
+
+## Project Structure
+
+```
+music-copilot/
+├── README.md
+├── .gitignore
+│
+├── frontend/
+│   ├── public/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── WaveformPlayer.tsx      # Audio upload, waveform display, region selection
+│   │   │   ├── ChatPanel.tsx           # Chat UI with streaming message rendering
+│   │   │   ├── MessageBubble.tsx       # Individual message component
+│   │   │   └── RegionInfo.tsx          # Displays currently selected region timestamps
+│   │   ├── hooks/
+│   │   │   ├── useAudioAnalysis.ts     # Triggers analysis, stores audio features
+│   │   │   └── useChat.ts             # Chat state, streaming, session context
+│   │   ├── types/
+│   │   │   └── index.ts               # Shared TypeScript types
+│   │   ├── utils/
+│   │   │   └── api.ts                 # API client functions
+│   │   ├── App.tsx                    # Root component, layout
+│   │   └── main.tsx                   # Entry point
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── vite.config.ts
+│   └── tailwind.config.js
+│
+└── backend/
+    ├── main.py                        # FastAPI app entry point, CORS, router registration
+    ├── routes/
+    │   ├── analyze.py                 # POST /analyze — audio upload and feature extraction
+    │   └── chat.py                    # POST /chat — AI response with streaming SSE
+    ├── services/
+    │   ├── audio_analysis.py          # librosa-based audio feature extraction
+    │   └── ai_service.py             # Claude API client, prompt construction, streaming
+    ├── models/
+    │   └── schemas.py                 # Pydantic request/response models
+    ├── pyproject.toml
+    └── requirements.txt
+```
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- **Node.js** v18+ and **npm** or **pnpm**
+- **Python** 3.10+
+- An **Anthropic API key** — get one at [console.anthropic.com](https://console.anthropic.com)
+- **ffmpeg** — required by librosa for audio decoding
+  - macOS: `brew install ffmpeg`
+  - Ubuntu: `sudo apt install ffmpeg`
+
+---
+
+### Backend Setup
+
+```bash
+# Navigate to the backend directory
+cd music-copilot/backend
+
+# Create and activate a virtual environment
+python -m venv venv
+source venv/bin/activate       # macOS/Linux
+# venv\Scripts\activate        # Windows
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Start the development server
+uvicorn main:app --reload --port 8000
+```
+
+The backend will be running at `http://localhost:8000`. You can explore the auto-generated API docs at `http://localhost:8000/docs`.
+
+---
+
+### Frontend Setup
+
+```bash
+# Navigate to the frontend directory
+cd music-copilot/frontend
+
+# Install dependencies
+npm install
+
+# Start the development server
+npm run dev
+```
+
+The frontend will be running at `http://localhost:5173`.
+
+---
+
+### Environment Variables
+
+#### Backend — create `backend/.env`
+
+```env
+# Required
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Optional
+CORS_ORIGINS=http://localhost:5173
+MAX_FILE_SIZE_MB=50
+```
+
+#### Frontend — create `frontend/.env`
+
+```env
+VITE_API_BASE_URL=http://localhost:8000
+```
+
+---
+
+## Usage
+
+### Basic workflow
+
+1. **Upload audio** — Click the upload area or drag and drop a `.wav`, `.mp3`, `.aiff`, or `.flac` file. The waveform renders automatically.
+
+2. **Select a region (optional)** — Click and drag on the waveform to select a specific section you want to focus on. The timestamps appear above the chat input. If no region is selected, the copilot analyzes the full file.
+
+3. **Ask your question** — Type naturally in the chat panel:
+   - *"This guitar part feels off beat, can you help me fix it?"*
+   - *"I want this to feel like a late-night drive — dark, reverb-y, slightly washed out"*
+   - *"The low end is muddy. What should I cut?"*
+   - *"What key is this in and does the melody clash with it anywhere?"*
+
+4. **Get specific advice** — The copilot analyzes your audio, understands the context of your question, and responds with actionable steps — specific to Logic Pro, specific to your file.
+
+5. **Follow up** — The session remembers everything. Ask follow-up questions naturally: *"Now do the same thing for bars 24–32"* or *"What if I wanted a warmer sound instead?"*
+
+---
+
+## API Reference
+
+### `POST /analyze`
+
+Accepts an audio file upload. Returns structured audio features.
+
+**Request:** `multipart/form-data`
+- `file`: audio file (`.wav`, `.mp3`, `.aiff`, `.flac`)
+- `start_time` *(optional)*: float, start of region in seconds
+- `end_time` *(optional)*: float, end of region in seconds
+
+**Response:**
+```json
+{
+  "session_id": "uuid",
+  "duration": 42.3,
+  "sample_rate": 44100,
+  "bpm": 92.4,
+  "key": "C minor",
+  "loudness_lufs": -14.2,
+  "dynamic_range_db": 8.1,
+  "spectral_centroid_mean": 2340.5,
+  "onset_strength_mean": 0.43,
+  "timing_issues": [
+    { "timestamp": 3.21, "description": "Late transient detected (+38ms)" }
+  ],
+  "frequency_profile": {
+    "low_energy": 0.42,
+    "mid_energy": 0.35,
+    "high_energy": 0.23
+  }
+}
+```
+
+---
+
+### `POST /chat`
+
+Sends a user message and streams back an AI response using Server-Sent Events (SSE).
+
+**Request:** `application/json`
+```json
+{
+  "session_id": "uuid",
+  "message": "The guitar feels a bit off beat in the first section",
+  "audio_features": { ... },
+  "region": { "start": 0.0, "end": 8.5 },
+  "history": [
+    { "role": "user", "content": "..." },
+    { "role": "assistant", "content": "..." }
+  ]
+}
+```
+
+**Response:** `text/event-stream`
+```
+data: {"type": "delta", "content": "Looking at your audio"}
+data: {"type": "delta", "content": ", I can see a few timing issues..."}
+data: {"type": "done"}
+```
+
+---
+
+## Roadmap
+
+### v1 — Core Loop (current)
+- [x] Project scaffold and architecture
+- [ ] Audio upload and waveform rendering
+- [ ] Region selection UI
+- [ ] Backend audio analysis (librosa)
+- [ ] Chat panel with streaming responses
+- [ ] Session context (conversation memory within a session)
+
+### v2 — Deeper Analysis
+- [ ] Stem-aware analysis (upload individual tracks)
+- [ ] Reference track upload ("make mine sound like this")
+- [ ] Pitch correction guidance (detect off-key notes with timestamps)
+- [ ] Clip gain and automation suggestions
+
+### v3 — DAW Integration
+- [ ] macOS native companion app (SwiftUI or Electron)
+- [ ] Logic Pro region handoff via OSC — select a region in Logic, it appears in the copilot automatically
+- [ ] Export suggested settings as Logic plugin presets (.pst files)
+- [ ] Keyboard shortcut to send selected region to copilot without manual export
+
+---
+
+## Contributing
+
+This is an early-stage project. If you're a producer or engineer who wants to shape what this becomes, open an issue or reach out.
+
+```bash
+# Clone the repo
+git clone https://github.com/yourusername/music-copilot.git
+cd music-copilot
+
+# Set up both environments (see Getting Started above)
+# Make your changes on a feature branch
+git checkout -b feature/your-feature-name
+
+# Submit a PR with a clear description of what it does and why
+```
+
+---
+
+*Built by a musician who got tired of not knowing what to do with his guitar recordings.*
