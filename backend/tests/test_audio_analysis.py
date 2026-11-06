@@ -163,3 +163,83 @@ def test_quiet_notes_are_not_flagged(write_wav, click_track):
     ghost = np.zeros_like(y)
     click(ghost, 6.0 + 0.04, 700)
     assert analyze_audio(write_wav(y + 0.3 * ghost)).timing_issues == []
+
+
+def strum(y: np.ndarray, time: float, freq: float, seed: int) -> None:
+    """A noisy guitar-like attack, harder for a beat tracker than a clean click."""
+    n = int(0.25 * SR)
+    start = int(time * SR)
+    t = np.arange(n) / SR
+    noise = np.random.default_rng(seed).standard_normal(n)
+    y[start : start + n] += (0.4 * np.sin(2 * np.pi * freq * t) + 0.15 * noise) * np.exp(-t / 0.06)
+
+
+def loop_98_bpm(late_note_ms: float = 0.0, repeats: int = 16) -> np.ndarray:
+    """A two-bar part at exactly 98 BPM with a syncopated rhythm, repeated sample for sample."""
+    sixteenth = 60 / 98 / 4
+    pattern = [0, 3, 6, 8, 10, 11, 14, 16, 19, 22, 24, 26, 30]
+    clip = np.zeros(round(32 * sixteenth * SR))
+    for i, step in enumerate(pattern):
+        late = late_note_ms / 1000 if step == 16 else 0.0
+        strum(clip, step * sixteenth + late, 196 + 40 * (i % 5), seed=i)
+    return np.tile(clip, repeats)
+
+
+def test_exact_loop_reports_its_true_tempo(write_wav):
+    assert analyze_audio(write_wav(loop_98_bpm())).bpm == pytest.approx(98.0, abs=0.1)
+
+
+def test_in_time_exact_loop_has_no_timing_issues(write_wav):
+    assert analyze_audio(write_wav(loop_98_bpm())).timing_issues == []
+
+
+def test_exact_loop_reports_a_late_note_once(write_wav):
+    issues = analyze_audio(write_wav(loop_98_bpm(late_note_ms=40))).timing_issues
+    assert len(issues) == 1
+    assert "late" in issues[0].description
+    # Beat 8 of the two-bar loop, 2.449s into a repeat, plus the 40ms push.
+    assert (issues[0].timestamp - 2.489) % (8 * 60 / 98) == pytest.approx(0, abs=0.04)
+
+
+def test_steady_tempo_with_a_different_part_each_bar_uses_the_true_tempo(write_wav):
+    # Same grid but no exact repeats, so this relies on the tempo fit alone.
+    sixteenth = 60 / 98 / 4
+    rng = np.random.default_rng(7)
+    y = np.zeros(SR * 40)
+    step = 0
+    while step * sixteenth < 39:
+        strum(y, step * sixteenth, float(rng.choice([165, 196, 220, 262])), seed=step)
+        step += int(rng.choice([1, 2, 2, 3, 4]))
+    features = analyze_audio(write_wav(y))
+    assert features.bpm == pytest.approx(98.0, abs=0.1)
+    assert features.timing_issues == []
+
+
+def test_free_tempo_playing_falls_back_without_a_rigid_grid(write_wav):
+    # A gradual slowdown from 110 to 95 BPM can't fit any single tempo.
+    y = np.zeros(SR * 40)
+    time, beat = 0.0, 60 / 110
+    while time < 39:
+        click(y, time)
+        time += beat
+        beat *= 1.002
+    features = analyze_audio(write_wav(y))
+    assert features.bpm is not None
+    assert features.timing_checked is False
+    assert features.timing_issues == []
+
+
+def test_reports_fitted_tempo_when_only_part_of_the_track_is_on_the_grid(write_wav):
+    # A loose opening keeps timing unchecked, but the rest still gives away the true tempo.
+    rng = np.random.default_rng(11)
+    sixteenth = 60 / 98 / 4
+    y = np.zeros(SR * 90)
+    step = 0
+    while step * sixteenth < 89:
+        time = step * sixteenth
+        loose = 0.03 * np.sin(time / 2) + 0.05 if time < 30 else 0.0
+        strum(y, time + loose, float(rng.choice([165, 196, 220, 262])), seed=step)
+        step += int(rng.choice([1, 2, 2, 3, 4]))
+    features = analyze_audio(write_wav(y))
+    assert features.timing_checked is False
+    assert features.bpm == pytest.approx(98.0, abs=0.2)

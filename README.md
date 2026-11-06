@@ -317,7 +317,7 @@ Accepts an audio file upload. Returns structured audio features.
 - `start_time` *(optional)*: float, start of region in seconds
 - `end_time` *(optional)*: float, end of region in seconds
 
-`timing_issues` are candidates to check by ear. Notes near the midpoint between grid lines and unusually quiet attacks are left out, because neither can be reliably called a mistake. Results are most dependable on a single instrument.
+`timing_issues` are candidates to check by ear. They're measured against a grid at the single tempo that best fits the track. If no steady tempo fits, `timing_checked` is `false` and no issues are reported, rather than guessing against an unreliable grid. Notes near the midpoint between grid lines and unusually quiet attacks are left out, and an exact digital loop reports each spot once.
 
 With a region, `bpm` and the beat grid come from the whole track. `timing_issues` are limited to the region, with timestamps as positions in the file. All other fields describe the region. Fields that can't be measured, such as loudness on a clip under 400ms or anything on silence, are `null`.
 
@@ -335,6 +335,7 @@ With a region, `bpm` and the beat grid come from the whole track. `timing_issues
   "dynamic_range_db": 8.1,
   "spectral_centroid_mean": 2340.5,
   "onset_strength_mean": 0.43,
+  "timing_checked": true,
   "timing_issues": [
     { "timestamp": 3.21, "description": "Onset ~38ms late against the beat grid" }
   ],

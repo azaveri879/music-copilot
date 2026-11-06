@@ -126,7 +126,7 @@ def test_preview_rejects_corrupt_audio():
 def test_audio_context_reports_zero_values_and_region():
     features = AudioFeatures(
         session_id="s", duration=4.0, sample_rate=44100, bpm=92.0, key="C minor",
-        loudness_lufs=0.0, dynamic_range_db=0.0,
+        loudness_lufs=0.0, dynamic_range_db=0.0, timing_checked=True,
         timing_issues=[TimingIssue(timestamp=3.21, description="Onset ~38ms late")],
         frequency_profile=FrequencyProfile(low_energy=0.5, mid_energy=0.3, high_energy=0.2),
     )
@@ -136,6 +136,11 @@ def test_audio_context_reports_zero_values_and_region():
     assert "0.0 dB" in ctx
     assert "3.21s" in ctx
     assert "Low (<250Hz) 50%" in ctx
+
+
+def test_audio_context_says_when_timing_was_not_checked():
+    features = AudioFeatures(session_id="s", duration=4.0, sample_rate=44100, timing_checked=False)
+    assert "not checked" in build_audio_context(features, None)
 
 
 def test_chat_streams_deltas_then_done(fake_anthropic):

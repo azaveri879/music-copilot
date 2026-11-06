@@ -29,6 +29,7 @@ class AudioFeatures(BaseModel):
     dynamic_range_db: Optional[float] = None
     spectral_centroid_mean: Optional[float] = None
     onset_strength_mean: Optional[float] = None
+    timing_checked: bool = False  # False when the tempo isn't steady enough to judge timing against
     timing_issues: list[TimingIssue] = []
     frequency_profile: Optional[FrequencyProfile] = None
 

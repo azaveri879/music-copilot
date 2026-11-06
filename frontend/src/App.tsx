@@ -134,6 +134,15 @@ export default function App() {
             </div>
           )}
 
+          {audioFeatures && !audioFeatures.timing_checked && audioFeatures.bpm !== null && (
+            <p className="text-xs text-gray-500 px-1">
+              Timing not checked: no steady tempo found to measure against.
+            </p>
+          )}
+          {audioFeatures?.timing_checked && audioFeatures.timing_issues.length === 0 && (
+            <p className="text-xs text-gray-500 px-1">No likely timing issues found against a steady tempo grid.</p>
+          )}
+
           {/* Waveform */}
           <WaveformPlayer file={file} region={selectedRegion} onRegionChange={setSelectedRegion} />
         </div>

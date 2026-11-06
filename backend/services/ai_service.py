@@ -77,7 +77,11 @@ def build_audio_context(features: AudioFeatures, region: AudioRegion | None) -> 
             f"**Frequency balance:** Low (<250Hz) {fp.low_energy:.0%} / Mid {fp.mid_energy:.0%} / High (>4kHz) {fp.high_energy:.0%}"
         )
 
-    if features.timing_issues:
+    if not features.timing_checked:
+        lines.append("\n**Timing:** not checked, because no steady tempo was found to measure against.")
+    elif not features.timing_issues:
+        lines.append("\n**Timing:** no likely issues found against a steady tempo grid.")
+    else:
         lines.append(f"\n**Possible timing issues ({len(features.timing_issues)}):**")
         lines.extend(f"  - {issue.timestamp:.2f}s: {issue.description}" for issue in features.timing_issues)
 
