@@ -1,11 +1,14 @@
 import os
+
 from dotenv import load_dotenv
+
+# Must run before the route imports, which read configuration at import time.
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routes.analyze import router as analyze_router
 from routes.chat import router as chat_router
-
-load_dotenv()
 
 app = FastAPI(
     title="Music Copilot API",

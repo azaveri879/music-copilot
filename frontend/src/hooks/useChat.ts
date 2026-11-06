@@ -68,7 +68,11 @@ export function useChat(sessionId: string) {
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Something went wrong";
         setError(msg);
-        setMessages((prev) => prev.slice(0, -1)); // remove empty assistant bubble
+        // Drop the bubble only if nothing arrived; a partial answer is still worth keeping.
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          return last?.role === "assistant" && last.content === "" ? prev.slice(0, -1) : prev;
+        });
       } finally {
         setIsStreaming(false);
       }

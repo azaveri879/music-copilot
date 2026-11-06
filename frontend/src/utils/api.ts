@@ -1,43 +1,57 @@
 import { AudioFeatures, ChatRequest } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const UNREACHABLE = `Can't reach the backend at ${API_BASE}. Is it running?`;
 
-export async function analyzeAudio(
-  file: File,
-  startTime?: number,
-  endTime?: number
-): Promise<AudioFeatures> {
-  const formData = new FormData();
-  formData.append("file", file);
-  if (startTime !== undefined) formData.append("start_time", String(startTime));
-  if (endTime !== undefined) formData.append("end_time", String(endTime));
+interface AnalyzeOptions {
+  start?: number;
+  end?: number;
+  signal?: AbortSignal;
+}
 
-  const res = await fetch(`${API_BASE}/analyze`, {
-    method: "POST",
-    body: formData,
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || "Audio analysis failed");
+async function post(path: string, init: RequestInit, fallbackError: string) {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, { method: "POST", ...init });
+  } catch (err) {
+    if (init.signal?.aborted) throw err;
+    throw new Error(UNREACHABLE);
   }
 
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(typeof body.detail === "string" ? body.detail : fallbackError);
+  }
+  return res;
+}
+
+export async function analyzeAudio(file: File, { start, end, signal }: AnalyzeOptions = {}): Promise<AudioFeatures> {
+  const formData = new FormData();
+  formData.append("file", file);
+  if (start !== undefined) formData.append("start_time", String(start));
+  if (end !== undefined) formData.append("end_time", String(end));
+
+  const res = await post("/analyze", { body: formData, signal }, "Audio analysis failed");
   return res.json();
 }
 
-export async function* streamChat(
-  request: ChatRequest
-): AsyncGenerator<string> {
-  const res = await fetch(`${API_BASE}/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
-  });
+/** A WAV copy of the file, for formats the browser can't decode itself. */
+export async function fetchPlayableAudio(file: File, signal: AbortSignal): Promise<Blob> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await post("/preview", { body: formData, signal }, "Couldn't prepare this file for playback");
+  return res.blob();
+}
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail || "Chat request failed");
-  }
+export async function* streamChat(request: ChatRequest): AsyncGenerator<string> {
+  const res = await post(
+    "/chat",
+    {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    },
+    "Chat request failed"
+  );
 
   const reader = res.body?.getReader();
   if (!reader) throw new Error("No response body");
@@ -47,7 +61,7 @@ export async function* streamChat(
 
   while (true) {
     const { done, value } = await reader.read();
-    if (done) break;
+    if (done) throw new Error("The connection dropped before the response finished.");
 
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split("\n");
@@ -55,16 +69,10 @@ export async function* streamChat(
 
     for (const line of lines) {
       if (!line.startsWith("data: ")) continue;
-      const data = line.slice(6).trim();
-      if (data === "[DONE]") return;
-      try {
-        const parsed = JSON.parse(data);
-        if (parsed.type === "delta" && parsed.content) {
-          yield parsed.content;
-        }
-      } catch {
-        // ignore malformed SSE chunks
-      }
+      const event = JSON.parse(line.slice(6));
+      if (event.type === "delta") yield event.content;
+      else if (event.type === "error") throw new Error(event.content);
+      else if (event.type === "done") return;
     }
   }
 }

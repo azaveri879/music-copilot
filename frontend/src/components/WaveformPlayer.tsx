@@ -2,24 +2,28 @@ import { useEffect, useRef, useState } from "react";
 import WaveSurfer from "wavesurfer.js";
 import RegionsPlugin from "wavesurfer.js/dist/plugins/regions.js";
 import { AudioRegion } from "../types";
+import { fetchPlayableAudio } from "../utils/api";
+import { formatTime } from "../utils/format";
 
 interface WaveformPlayerProps {
   file: File | null;
+  region: AudioRegion | null;
   onRegionChange: (region: AudioRegion | null) => void;
 }
 
-export function WaveformPlayer({ file, onRegionChange }: WaveformPlayerProps) {
+export function WaveformPlayer({ file, region, onRegionChange }: WaveformPlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
+  const regionsRef = useRef<RegionsPlugin | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     if (!containerRef.current) return;
 
     const regions = RegionsPlugin.create();
-
     const ws = WaveSurfer.create({
       container: containerRef.current,
       waveColor: "#6366f1",
@@ -33,68 +37,94 @@ export function WaveformPlayer({ file, onRegionChange }: WaveformPlayerProps) {
     });
 
     wavesurferRef.current = ws;
+    regionsRef.current = regions;
 
     ws.on("ready", () => setDuration(ws.getDuration()));
     ws.on("timeupdate", (t) => setCurrentTime(t));
     ws.on("play", () => setIsPlaying(true));
     ws.on("pause", () => setIsPlaying(false));
     ws.on("finish", () => setIsPlaying(false));
+    ws.on("error", () => setLoadError(true));
 
-    // Allow user to draw regions by clicking and dragging
     regions.enableDragSelection({ color: "rgba(99, 102, 241, 0.2)" });
 
-    regions.on("region-created", (region) => {
+    regions.on("region-created", (created) => {
       // Only keep one region at a time
-      const all = regions.getRegions();
-      all.forEach((r) => { if (r.id !== region.id) r.remove(); });
-      onRegionChange({ start: region.start, end: region.end });
+      regions.getRegions().forEach((r) => {
+        if (r.id !== created.id) r.remove();
+      });
+      onRegionChange({ start: created.start, end: created.end });
     });
 
-    regions.on("region-updated", (region) => {
-      onRegionChange({ start: region.start, end: region.end });
+    regions.on("region-updated", (updated) => {
+      onRegionChange({ start: updated.start, end: updated.end });
     });
 
-    regions.on("region-removed", () => {
-      if (regions.getRegions().length === 0) onRegionChange(null);
-    });
-
-    return () => ws.destroy();
-  }, []);
+    return () => {
+      ws.destroy();
+      wavesurferRef.current = null;
+      regionsRef.current = null;
+    };
+  }, [onRegionChange]);
 
   useEffect(() => {
     if (!wavesurferRef.current || !file) return;
-    const url = URL.createObjectURL(file);
-    wavesurferRef.current.load(url);
-    return () => URL.revokeObjectURL(url);
+    setLoadError(false);
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
+
+    const controller = new AbortController();
+    let url: string | null = null;
+
+    // Chrome and Firefox can't decode AIFF, a common Logic bounce format.
+    const source = /\.aiff?$/i.test(file.name) ? fetchPlayableAudio(file, controller.signal) : Promise.resolve(file);
+    source
+      .then((audio) => {
+        if (controller.signal.aborted) return;
+        url = URL.createObjectURL(audio);
+        return wavesurferRef.current?.load(url);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setLoadError(true);
+      });
+
+    return () => {
+      controller.abort();
+      if (url) URL.revokeObjectURL(url);
+    };
   }, [file]);
 
-  const togglePlay = () => wavesurferRef.current?.playPause();
-
-  const formatTime = (s: number) => {
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return `${m}:${sec.toString().padStart(2, "0")}`;
-  };
-
-  if (!file) return null;
+  // Clearing the selection from outside (new file, "Use full track") removes the highlight.
+  useEffect(() => {
+    if (!region) regionsRef.current?.clearRegions();
+  }, [region]);
 
   return (
-    <div className="bg-gray-900 rounded-xl p-4 space-y-3">
-      <div ref={containerRef} className="w-full" />
-      <div className="flex items-center gap-4">
-        <button
-          onClick={togglePlay}
-          className="w-8 h-8 flex items-center justify-center rounded-full bg-indigo-500 hover:bg-indigo-400 transition-colors text-white text-sm"
-        >
-          {isPlaying ? "⏸" : "▶"}
-        </button>
-        <span className="text-xs text-gray-400 font-mono">
-          {formatTime(currentTime)} / {formatTime(duration)}
-        </span>
-        <span className="text-xs text-gray-500">
-          Click and drag on the waveform to select a region
-        </span>
-      </div>
+    // The container stays mounted: WaveSurfer attaches to it once, before any file exists.
+    <div className={`bg-gray-900 rounded-xl p-4 space-y-3 ${file ? "" : "hidden"}`}>
+      {loadError && (
+        <p className="text-xs text-amber-300/80">
+          Couldn't load this file for playback, so there's no waveform or region selection. Analysis and chat still
+          cover the full track if the analysis above succeeded.
+        </p>
+      )}
+      <div ref={containerRef} className={`w-full ${loadError ? "hidden" : ""}`} />
+      {!loadError && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <button
+            onClick={() => wavesurferRef.current?.playPause()}
+            aria-label={isPlaying ? "Pause" : "Play"}
+            className="w-8 h-8 flex items-center justify-center rounded-full bg-indigo-500 hover:bg-indigo-400 transition-colors text-white text-sm"
+          >
+            {isPlaying ? "⏸" : "▶"}
+          </button>
+          <span className="text-xs text-gray-400 font-mono">
+            {formatTime(currentTime)} / {formatTime(duration)}
+          </span>
+          <span className="text-xs text-gray-500">Click and drag on the waveform to select a region</span>
+        </div>
+      )}
     </div>
   );
 }

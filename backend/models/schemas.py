@@ -1,5 +1,6 @@
-from pydantic import BaseModel
-from typing import Optional
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field
 
 
 class AudioRegion(BaseModel):
@@ -33,13 +34,13 @@ class AudioFeatures(BaseModel):
 
 
 class ChatHistoryItem(BaseModel):
-    role: str
+    role: Literal["user", "assistant"]
     content: str
 
 
 class ChatRequest(BaseModel):
     session_id: str
-    message: str
+    message: str = Field(min_length=1)
     audio_features: Optional[AudioFeatures] = None
     region: Optional[AudioRegion] = None
     history: list[ChatHistoryItem] = []
