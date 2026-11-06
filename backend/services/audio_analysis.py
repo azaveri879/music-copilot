@@ -25,6 +25,11 @@ SILENCE_RMS = 1e-5
 # triplets, so swung or triplet parts aren't reported as mistimed.
 GRID_FRACTIONS = np.array([0, 1 / 4, 1 / 3, 1 / 2, 2 / 3, 3 / 4])
 TIMING_THRESHOLD_MS = 30
+# A note this far towards the midpoint of two grid lines (0 = on the line, 1 = at
+# the midpoint) has no clear intended position, so it can't be called late or early.
+TIMING_MAX_AMBIGUITY = 0.75
+# Quieter attacks, relative to the track's median attack, are likely ghost notes or noise.
+TIMING_MIN_RELATIVE_STRENGTH = 0.5
 TIMING_MIN_SPACING_S = 0.5
 MAX_TIMING_ISSUES = 10
 
@@ -103,6 +108,10 @@ def _build_grid(beat_times: np.ndarray) -> np.ndarray:
     return np.append(grid, smoothed[-1])
 
 
+def _nearest_index(times: np.ndarray, grid: np.ndarray) -> np.ndarray:
+    return np.abs(times[:, None] - grid[None, :]).argmin(axis=1)
+
+
 def detect_timing_issues(
     y: np.ndarray,
     sr: int,
@@ -119,24 +128,37 @@ def detect_timing_issues(
     if len(beat_times) < 4 or is_silent(y):
         return []
 
-    onsets = librosa.onset.onset_detect(y=y, sr=sr, units="time")
-    if len(onsets) == 0:
+    onset_envelope = librosa.onset.onset_strength(y=y, sr=sr)
+    onset_frames = librosa.onset.onset_detect(onset_envelope=onset_envelope, sr=sr)
+    if len(onset_frames) == 0:
         return []
 
+    onsets = librosa.frames_to_time(onset_frames, sr=sr)
+    strengths = onset_envelope[onset_frames]
     grid = _build_grid(beat_times)
-    nearest = np.abs(onsets[:, None] - grid[None, :]).argmin(axis=1)
-    deviations = onsets - grid[nearest]
 
     # Onset detection reports consistently slightly late or early. Only the
     # departure from that consistent offset says anything about the performance.
-    deviations = deviations - np.median(deviations)
+    adjusted = onsets - np.median(onsets - grid[_nearest_index(onsets, grid)])
+    nearest = _nearest_index(adjusted, grid)
+    deviations = adjusted - grid[nearest]
+
+    # How far each note has moved towards the midpoint with the next grid line.
+    neighbours = np.clip(nearest + np.where(deviations >= 0, 1, -1), 0, len(grid) - 1)
+    half_gaps = np.abs(grid[neighbours] - grid[nearest]) / 2
+    ambiguity = np.abs(deviations) / np.maximum(half_gaps, 1e-6)
 
     in_scope = (onsets >= max(start, grid[0])) & (onsets <= min(end if end is not None else np.inf, grid[-1]))
-    flagged = in_scope & (np.abs(deviations) * 1000 >= TIMING_THRESHOLD_MS)
+    flagged = (
+        in_scope
+        & (np.abs(deviations) * 1000 >= TIMING_THRESHOLD_MS)
+        & (ambiguity <= TIMING_MAX_AMBIGUITY)
+        & (strengths >= TIMING_MIN_RELATIVE_STRENGTH * np.median(strengths))
+    )
 
-    # Worst first, skipping anything close to an onset we've already reported.
+    # Strongest attacks first, skipping anything close to an onset we've already reported.
     kept: list[tuple[float, float]] = []
-    for i in np.flatnonzero(flagged)[np.argsort(-np.abs(deviations[flagged]))]:
+    for i in np.flatnonzero(flagged)[np.argsort(-strengths[flagged])]:
         time = float(onsets[i])
         if all(abs(time - other) >= TIMING_MIN_SPACING_S for other, _ in kept):
             kept.append((time, float(deviations[i])))

@@ -300,7 +300,9 @@ The suite needs no API key. It generates its own audio and runs the Anthropic SD
 
 4. **Get specific advice** — The copilot analyzes your audio, understands the context of your question, and responds with actionable steps — specific to Logic Pro, specific to your file.
 
-5. **Follow up** — The session remembers everything. Ask follow-up questions naturally: *"Now do the same thing for bars 24–32"* or *"What if I wanted a warmer sound instead?"*
+5. **Adjust the layout** — Drag the divider beside the chat panel to widen or narrow it, or focus it and use the arrow keys. Double-click to reset. Your width is remembered.
+
+6. **Follow up** — The session remembers everything. Ask follow-up questions naturally: *"Now do the same thing for bars 24–32"* or *"What if I wanted a warmer sound instead?"*
 
 ---
 
@@ -314,6 +316,8 @@ Accepts an audio file upload. Returns structured audio features.
 - `file`: audio file (`.wav`, `.mp3`, `.aiff`, `.aif`, `.flac`)
 - `start_time` *(optional)*: float, start of region in seconds
 - `end_time` *(optional)*: float, end of region in seconds
+
+`timing_issues` are candidates to check by ear. Notes near the midpoint between grid lines and unusually quiet attacks are left out, because neither can be reliably called a mistake. Results are most dependable on a single instrument.
 
 With a region, `bpm` and the beat grid come from the whole track. `timing_issues` are limited to the region, with timestamps as positions in the file. All other fields describe the region. Fields that can't be measured, such as loudness on a clip under 400ms or anything on silence, are `null`.
 

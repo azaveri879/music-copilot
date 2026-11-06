@@ -136,3 +136,30 @@ def test_corrupt_file_raises_decode_error(tmp_path):
 def test_invalid_region_raises(write_wav, start, end):
     with pytest.raises(InvalidRegionError):
         analyze_audio(write_wav(tone(440, 10.0)), start_time=start, end_time=end)
+
+
+def test_notes_between_grid_lines_are_not_called_mistimed(write_wav, click_track):
+    # Pickups halfway between 16ths at 120 BPM have no clear intended position,
+    # so "late" or "early" means nothing for them.
+    y = click_track()
+    for beat in [3, 9, 15, 21, 27, 33]:
+        click(y, beat * 0.5 + 0.0625, 700)
+    assert analyze_audio(write_wav(y)).timing_issues == []
+
+
+def test_real_error_is_found_among_notes_between_grid_lines(write_wav, click_track):
+    y = click_track(offsets={12: 0.045})
+    for beat in [3, 9, 15, 21, 27, 33]:
+        click(y, beat * 0.5 + 0.0625, 700)
+    issues = analyze_audio(write_wav(y)).timing_issues
+    assert len(issues) == 1
+    assert issues[0].timestamp == pytest.approx(6.045, abs=0.03)
+    assert "late" in issues[0].description
+
+
+def test_quiet_notes_are_not_flagged(write_wav, click_track):
+    # A ghost note slightly off the grid shouldn't be reported as a mistake.
+    y = click_track()
+    ghost = np.zeros_like(y)
+    click(ghost, 6.0 + 0.04, 700)
+    assert analyze_audio(write_wav(y + 0.3 * ghost)).timing_issues == []

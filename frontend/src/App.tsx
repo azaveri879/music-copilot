@@ -1,9 +1,10 @@
-import { useCallback, useState } from "react";
+import { CSSProperties, useCallback, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { ChatPanel } from "./components/ChatPanel";
 import { WaveformPlayer } from "./components/WaveformPlayer";
 import { useAudioAnalysis } from "./hooks/useAudioAnalysis";
 import { useChat } from "./hooks/useChat";
+import { useResizableWidth } from "./hooks/useResizableWidth";
 import { AudioRegion } from "./types";
 import { formatTime } from "./utils/format";
 
@@ -17,6 +18,8 @@ export default function App() {
   const { trackFeatures, regionFeatures, isAnalyzingTrack, isAnalyzingRegion, error: analysisError } =
     useAudioAnalysis(file, selectedRegion);
   const { messages, isStreaming, error: chatError, sendMessage } = useChat(SESSION_ID);
+
+  const { width: chatWidth, handleProps: chatResizeProps } = useResizableWidth();
 
   const audioFeatures = regionFeatures ?? trackFeatures;
 
@@ -136,7 +139,15 @@ export default function App() {
         </div>
 
         {/* Right panel — chat */}
-        <div className="w-full lg:w-96 h-[32rem] lg:h-auto flex-shrink-0 border-t lg:border-t-0 lg:border-l border-gray-800 p-4 min-h-0">
+        <div
+          {...chatResizeProps}
+          aria-label="Resize chat panel"
+          className="hidden lg:block w-1.5 flex-shrink-0 cursor-col-resize touch-none bg-gray-800 hover:bg-indigo-500 focus-visible:bg-indigo-500 focus:outline-none transition-colors"
+        />
+        <div
+          style={{ "--chat-width": `${chatWidth}px` } as CSSProperties}
+          className="w-full lg:w-[var(--chat-width)] h-[32rem] lg:h-auto flex-shrink-0 border-t lg:border-t-0 border-gray-800 p-4 min-h-0"
+        >
           <ChatPanel
             messages={messages}
             isStreaming={isStreaming}
