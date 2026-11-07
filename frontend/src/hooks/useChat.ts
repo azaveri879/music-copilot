@@ -12,7 +12,8 @@ export function useChat(sessionId: string) {
     async (
       text: string,
       audioFeatures: AudioFeatures | null,
-      region: AudioRegion | null
+      region: AudioRegion | null,
+      file: File | null
     ) => {
       if (!text.trim() || isStreaming) return;
 
@@ -41,7 +42,8 @@ export function useChat(sessionId: string) {
       try {
         const history = messages.map((m) => ({
           role: m.role,
-          content: m.content,
+          // Keep earlier proposals in view, so "make that EQ gentler" has something to refer to.
+          content: m.proposal ? `${m.content}\n\n[Proposed edits: ${JSON.stringify(m.proposal)}]` : m.content,
         }));
 
         const stream = streamChat({
@@ -52,15 +54,20 @@ export function useChat(sessionId: string) {
           history,
         });
 
-        for await (const chunk of stream) {
+        for await (const event of stream) {
           setMessages((prev) => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
             if (last.role === "assistant") {
-              updated[updated.length - 1] = {
-                ...last,
-                content: last.content + chunk,
-              };
+              updated[updated.length - 1] =
+                event.type === "text"
+                  ? { ...last, content: last.content + event.text }
+                  : {
+                      ...last,
+                      proposal: event.proposal,
+                      proposalFile: file ?? undefined,
+                      proposalRegion: region,
+                    };
             }
             return updated;
           });

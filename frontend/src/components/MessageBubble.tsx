@@ -1,12 +1,14 @@
 import ReactMarkdown from "react-markdown";
 import { ChatMessage } from "../types";
 import { formatTime } from "../utils/format";
+import { EditProposalCard, ProposalHandlers } from "./EditProposalCard";
 
 interface MessageBubbleProps {
   message: ChatMessage;
+  proposalHandlers: ProposalHandlers;
 }
 
-export function MessageBubble({ message }: MessageBubbleProps) {
+export function MessageBubble({ message, proposalHandlers }: MessageBubbleProps) {
   const isUser = message.role === "user";
 
   return (
@@ -23,13 +25,14 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         )}
         {isUser ? (
           <p className="whitespace-pre-wrap break-words">{message.content}</p>
-        ) : message.content === "" ? (
+        ) : message.content === "" && !message.proposal ? (
           <span className="animate-pulse opacity-50">▌</span>
         ) : (
           <div className="markdown">
             <ReactMarkdown>{message.content}</ReactMarkdown>
           </div>
         )}
+        {message.proposal && <EditProposalCard message={message} handlers={proposalHandlers} />}
       </div>
     </div>
   );

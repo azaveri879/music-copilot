@@ -42,7 +42,7 @@ def anthropic_stream(words: list[str], stop_reason: str = "end_turn") -> bytes:
 @pytest.fixture
 def fake_anthropic(monkeypatch):
     """Run the real SDK against a local stand-in for the Messages API."""
-    state = {"status": 200, "body": anthropic_stream(["Cut ", "at 300Hz."]), "requests": []}
+    state = {"status": 200, "body": anthropic_stream(["Cut ", "at 300Hz."]), "queue": [], "requests": []}
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -52,7 +52,8 @@ def fake_anthropic(monkeypatch):
             is_ok = state["status"] == 200
             self.send_header("content-type", "text/event-stream" if is_ok else "application/json")
             self.end_headers()
-            self.wfile.write(state["body"] if is_ok else json.dumps(
+            body = state["queue"].pop(0) if state["queue"] else state["body"]
+            self.wfile.write(body if is_ok else json.dumps(
                 {"type": "error", "error": {"type": "api_error", "message": "nope"}}).encode())
 
         def log_message(self, *args):
@@ -193,6 +194,192 @@ def test_chat_reports_refusal_as_error(fake_anthropic):
     events = sse_events(client.post("/chat", json={"session_id": "s", "message": "hi"}).text)
     assert events[-1]["type"] == "error"
     assert "declined" in events[-1]["content"]
+
+
+def anthropic_tool_stream(text: str, tool_input: str) -> bytes:
+    """A reply that writes some text and then calls propose_edits, in the wire format."""
+    events = [
+        ("message_start", {"type": "message_start", "message": {
+            "id": "msg_test", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+            "content": [], "stop_reason": None, "stop_sequence": None,
+            "usage": {"input_tokens": 1, "output_tokens": 1}}}),
+        ("content_block_start", {"type": "content_block_start", "index": 0,
+                                 "content_block": {"type": "text", "text": ""}}),
+        ("content_block_delta", {"type": "content_block_delta", "index": 0,
+                                 "delta": {"type": "text_delta", "text": text}}),
+        ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+        ("content_block_start", {"type": "content_block_start", "index": 1, "content_block": {
+            "type": "tool_use", "id": "toolu_1", "name": "propose_edits", "input": {}}}),
+        ("content_block_delta", {"type": "content_block_delta", "index": 1,
+                                 "delta": {"type": "input_json_delta", "partial_json": tool_input}}),
+        ("content_block_stop", {"type": "content_block_stop", "index": 1}),
+        ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                           "usage": {"output_tokens": 5}}),
+        ("message_stop", {"type": "message_stop"}),
+    ]
+    return "".join(f"event: {name}\ndata: {json.dumps(data)}\n\n" for name, data in events).encode()
+
+
+AUDIO = {"session_id": "s", "duration": 4.0, "sample_rate": 44100, "bpm": 92.0}
+
+
+def analyzed_audio() -> dict:
+    """Analyze a loud test tone, so the backend holds the audio for measuring."""
+    y = 0.5 * np.sin(2 * np.pi * 440 * np.arange(44100 * 3) / 44100)
+    return client.post("/analyze", files=wav_upload(y)).json()
+
+
+GAIN_PROPOSAL = {"summary": "Turn it down", "edits": [{"type": "gain", "reason": "", "gain_db": -6}]}
+
+
+def test_proposal_is_measured_on_the_real_audio_and_returned_to_claude(fake_anthropic):
+    fake_anthropic["queue"] = [
+        anthropic_tool_stream("Turning it down.", json.dumps(GAIN_PROPOSAL)),
+        anthropic_stream(["Measured ", "6 dB quieter."]),
+    ]
+    res = client.post("/chat", json={"session_id": "s", "message": "Quieter", "audio_features": analyzed_audio()})
+    events = sse_events(res.text)
+
+    assert [e["type"] for e in events] == ["delta", "delta", "delta", "delta", "proposal", "done"]
+    assert "".join(e["content"] for e in events if e["type"] == "delta") == "Turning it down.\n\nMeasured 6 dB quieter."
+    assert events[-2]["proposal"]["summary"] == "Turn it down"
+
+    second = fake_anthropic["requests"][1]["body"]["messages"]
+    assert second[-2]["role"] == "assistant"
+    result = second[-1]["content"][0]
+    assert result["type"] == "tool_result"
+    measured = json.loads(result["content"].split("whole file: ")[1].split("}.")[0] + "}")
+    assert measured["after_lufs"] - measured["before_lufs"] == pytest.approx(-6, abs=0.1)
+    assert measured["after_peak_dbfs"] - measured["before_peak_dbfs"] == pytest.approx(-6, abs=0.1)
+
+
+def test_claude_can_revise_and_the_user_sees_only_the_last_proposal(fake_anthropic):
+    revised = {"summary": "Gentler", "edits": [{"type": "gain", "reason": "", "gain_db": -2}]}
+    fake_anthropic["queue"] = [
+        anthropic_tool_stream("Trying this.", json.dumps(GAIN_PROPOSAL)),
+        anthropic_tool_stream("Too much, revising.", json.dumps(revised)),
+        anthropic_stream(["Done."]),
+    ]
+    res = client.post("/chat", json={"session_id": "s", "message": "Quieter", "audio_features": analyzed_audio()})
+    proposals = [e for e in sse_events(res.text) if e["type"] == "proposal"]
+    assert [p["proposal"]["summary"] for p in proposals] == ["Gentler"]
+
+
+def test_revisions_stop_after_the_limit(fake_anthropic):
+    fake_anthropic["body"] = anthropic_tool_stream("Again.", json.dumps(GAIN_PROPOSAL))
+    res = client.post("/chat", json={"session_id": "s", "message": "Quieter", "audio_features": analyzed_audio()})
+    assert len(fake_anthropic["requests"]) == 3
+    assert fake_anthropic["requests"][-1]["body"]["tool_choice"] == {"type": "none"}
+    assert sum(e["type"] == "proposal" for e in sse_events(res.text)) == 1
+
+
+def test_invalid_proposal_goes_back_to_claude_and_never_reaches_the_user(fake_anthropic):
+    fake_anthropic["queue"] = [
+        anthropic_tool_stream("Louder!", json.dumps({
+            "summary": "Way louder", "edits": [{"type": "gain", "reason": "", "gain_db": 90}],
+        })),
+        anthropic_stream(["Sorry, that was out of range."]),
+    ]
+    res = client.post("/chat", json={"session_id": "s", "message": "Louder", "audio_features": analyzed_audio()})
+    assert not any(e["type"] == "proposal" for e in sse_events(res.text))
+    result = fake_anthropic["requests"][1]["body"]["messages"][-1]["content"][0]
+    assert result["is_error"] is True
+
+
+def test_proposal_still_shown_when_the_audio_is_no_longer_in_memory(fake_anthropic):
+    fake_anthropic["queue"] = [
+        anthropic_tool_stream("Turning it down.", json.dumps(GAIN_PROPOSAL)),
+        anthropic_stream(["Can't quote numbers."]),
+    ]
+    res = client.post("/chat", json={"session_id": "s", "message": "Quieter", "audio_features": AUDIO})
+    assert any(e["type"] == "proposal" for e in sse_events(res.text))
+    result = fake_anthropic["requests"][1]["body"]["messages"][-1]["content"][0]
+    assert "Don't quote numbers" in result["content"]
+
+
+def test_estimate_measures_without_changing_anything():
+    y = 0.5 * np.sin(2 * np.pi * 440 * np.arange(44100 * 3) / 44100)
+    res = client.post("/edit/estimate", files=wav_upload(y), data={"edits": json.dumps([{"type": "gain", "gain_db": -6}])})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["after_lufs"] - body["before_lufs"] == pytest.approx(-6, abs=0.1)
+    assert body["before_peak_dbfs"] == pytest.approx(-6, abs=0.1)
+    assert body["turned_down_db"] == 0
+
+
+def test_estimate_reports_being_turned_down_to_avoid_clipping():
+    y = 0.9 * np.sin(2 * np.pi * 440 * np.arange(44100 * 3) / 44100)
+    res = client.post("/edit/estimate", files=wav_upload(y), data={"edits": json.dumps([{"type": "gain", "gain_db": 12}])})
+    assert res.json()["turned_down_db"] > 0
+
+
+def test_estimate_covers_only_the_region():
+    y = 0.5 * np.sin(2 * np.pi * 440 * np.arange(44100 * 4) / 44100)
+    res = client.post("/edit/estimate", files=wav_upload(y), data={
+        "edits": json.dumps([{"type": "gain", "gain_db": -6}]), "start_time": "1.0", "end_time": "3.0",
+    })
+    assert res.json()["after_lufs"] - res.json()["before_lufs"] == pytest.approx(-6, abs=0.2)
+
+
+def test_chat_only_offers_editing_when_there_is_audio(fake_anthropic):
+    client.post("/chat", json={"session_id": "s", "message": "hi"})
+    assert not fake_anthropic["requests"][0]["body"].get("tools")
+    client.post("/chat", json={"session_id": "s", "message": "hi", "audio_features": AUDIO})
+    tools = fake_anthropic["requests"][1]["body"]["tools"]
+    assert tools[0]["name"] == "propose_edits"
+    assert tools[0]["eager_input_streaming"] is True
+
+
+def wav_upload(y: np.ndarray) -> dict:
+    buffer = io.BytesIO()
+    sf.write(buffer, y, 44100, format="WAV")
+    return {"file": ("take.wav", buffer.getvalue(), "audio/wav")}
+
+
+def test_analyze_reports_peak_level():
+    y = 0.5 * np.sin(2 * np.pi * 440 * np.arange(44100) / 44100)
+    assert client.post("/analyze", files=wav_upload(y)).json()["peak_dbfs"] == pytest.approx(-6, abs=0.1)
+
+
+def test_audio_context_includes_peak_level():
+    features = AudioFeatures(session_id="s", duration=4.0, sample_rate=44100, peak_dbfs=-0.1)
+    assert "**Peak:** -0.1 dBFS" in build_audio_context(features, None)
+
+
+def test_edit_returns_wav_and_report():
+    y = 0.1 * np.sin(2 * np.pi * 440 * np.arange(44100) / 44100)
+    res = client.post("/edit", files=wav_upload(y), data={"edits": json.dumps([{"type": "gain", "gain_db": 6}])})
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "audio/wav"
+    assert json.loads(res.headers["x-edit-report"])["nudges_applied"] == 0
+    out, sr = sf.read(io.BytesIO(res.content))
+    assert sr == 44100
+    assert np.abs(out).max() == pytest.approx(0.1995, abs=0.002)
+
+
+def test_edit_uses_the_region():
+    y = 0.1 * np.sin(2 * np.pi * 440 * np.arange(44100 * 2) / 44100)
+    res = client.post("/edit", files=wav_upload(y), data={
+        "edits": json.dumps([{"type": "gain", "gain_db": -12}]), "start_time": "1.0", "end_time": "2.0",
+    })
+    out, _ = sf.read(io.BytesIO(res.content))
+    assert np.abs(out[:40000]).max() == pytest.approx(0.1, abs=0.001)
+    assert np.abs(out[50000:87000]).max() == pytest.approx(0.0251, abs=0.001)
+
+
+@pytest.mark.parametrize("edits", ["not json", json.dumps([{"type": "gain", "gain_db": 99}]), "[]"])
+def test_edit_rejects_bad_edits(edits):
+    y = np.zeros(44100)
+    assert client.post("/edit", files=wav_upload(y), data={"edits": edits}).status_code == 400
+
+
+def test_edit_rejects_a_nudge_with_no_note():
+    y = np.zeros(44100)
+    res = client.post("/edit", files=wav_upload(y), data={
+        "edits": json.dumps([{"type": "nudge", "onset_time": 0.5, "shift_ms": 20}]),
+    })
+    assert res.status_code == 400
+    assert "Couldn't move" in res.json()["detail"]
 
 
 def test_chat_rejects_empty_message():

@@ -4,7 +4,7 @@ import logging
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
-from models.schemas import ChatRequest
+from models.schemas import ChatRequest, EditProposal
 from services.ai_service import ChatError, stream_chat_response
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,10 @@ async def chat_endpoint(request: ChatRequest):
                 region=request.region,
                 history=request.history,
             ):
-                yield sse({"type": "delta", "content": chunk})
+                if isinstance(chunk, EditProposal):
+                    yield sse({"type": "proposal", "proposal": chunk.model_dump()})
+                else:
+                    yield sse({"type": "delta", "content": chunk})
             yield sse({"type": "done"})
         except ChatError as exc:
             yield sse({"type": "error", "content": str(exc)})

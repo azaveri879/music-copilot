@@ -313,6 +313,12 @@ def compute_loudness_lufs(y: np.ndarray, sr: int) -> float | None:
     return round(float(loudness), 1) if np.isfinite(loudness) else None
 
 
+def compute_peak_dbfs(y: np.ndarray) -> float | None:
+    """Highest sample level. Keeping this below 0 is what avoids clipping."""
+    peak = float(np.abs(y).max()) if y.size else 0.0
+    return round(20 * np.log10(peak), 1) if peak > 0 else None
+
+
 def compute_dynamic_range(y: np.ndarray) -> float | None:
     """Spread between loud and quiet passages: 95th minus 10th percentile of short-term level."""
     if is_silent(y):
@@ -394,6 +400,7 @@ def analyze_audio(
         bpm=bpm,
         key=detect_key(mono_region, sr),
         loudness_lufs=compute_loudness_lufs(region, sr),
+        peak_dbfs=compute_peak_dbfs(region),
         dynamic_range_db=compute_dynamic_range(mono_region),
         spectral_centroid_mean=centroid,
         onset_strength_mean=onset_strength,

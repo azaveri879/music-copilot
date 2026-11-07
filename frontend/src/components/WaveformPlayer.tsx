@@ -7,14 +7,17 @@ import { formatTime } from "../utils/format";
 
 interface WaveformPlayerProps {
   file: File | null;
+  // When set, this plays and displays instead of the file. Switching keeps the playback position.
+  editedAudio: Blob | null;
   region: AudioRegion | null;
   onRegionChange: (region: AudioRegion | null) => void;
 }
 
-export function WaveformPlayer({ file, region, onRegionChange }: WaveformPlayerProps) {
+export function WaveformPlayer({ file, editedAudio, region, onRegionChange }: WaveformPlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
   const regionsRef = useRef<RegionsPlugin | null>(null);
+  const loadedFileRef = useRef<File | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -69,21 +72,38 @@ export function WaveformPlayer({ file, region, onRegionChange }: WaveformPlayerP
 
   useEffect(() => {
     if (!wavesurferRef.current || !file) return;
+    const ws = wavesurferRef.current;
+    const isSameFile = loadedFileRef.current === file;
+    loadedFileRef.current = file;
+    const resumeAt = isSameFile ? ws.getCurrentTime() : 0;
+    const resumePlaying = isSameFile && ws.isPlaying();
+
     setLoadError(false);
-    setIsPlaying(false);
-    setCurrentTime(0);
-    setDuration(0);
+    if (!isSameFile) {
+      setIsPlaying(false);
+      setCurrentTime(0);
+      setDuration(0);
+    }
 
     const controller = new AbortController();
     let url: string | null = null;
 
     // Chrome and Firefox can't decode AIFF, a common Logic bounce format.
-    const source = /\.aiff?$/i.test(file.name) ? fetchPlayableAudio(file, controller.signal) : Promise.resolve(file);
+    const source = editedAudio
+      ? Promise.resolve(editedAudio)
+      : /\.aiff?$/i.test(file.name)
+        ? fetchPlayableAudio(file, controller.signal)
+        : Promise.resolve(file);
     source
       .then((audio) => {
         if (controller.signal.aborted) return;
         url = URL.createObjectURL(audio);
-        return wavesurferRef.current?.load(url);
+        return ws.load(url);
+      })
+      .then(() => {
+        if (controller.signal.aborted || !isSameFile) return;
+        ws.setTime(resumeAt);
+        if (resumePlaying) ws.play();
       })
       .catch(() => {
         if (!controller.signal.aborted) setLoadError(true);
@@ -93,7 +113,7 @@ export function WaveformPlayer({ file, region, onRegionChange }: WaveformPlayerP
       controller.abort();
       if (url) URL.revokeObjectURL(url);
     };
-  }, [file]);
+  }, [file, editedAudio]);
 
   // Clearing the selection from outside (new file, "Use full track") removes the highlight.
   useEffect(() => {
