@@ -45,6 +45,7 @@ export interface AudioFeatures {
   band_levels: BandLevel[];
   prominent_frequencies_hz: number[];
   peak_moments: PeakMoment[];
+  active_ranges: AudioRegion[];
 }
 
 export interface GainEdit {
@@ -135,10 +136,17 @@ export interface ChatMessage {
 
 export type FileType = "track" | "mix" | "master";
 
+export interface TrackSummary {
+  name: string;
+  features: AudioFeatures;
+}
+
 /** What the user has told us about the audio, which analysis can't work out reliably. */
 export interface AudioContext {
   fileType: FileType | null;
   songBpm: number | null;
+  sessionTracks: TrackSummary[];
+  focusedTrack: string | null;
 }
 
 export interface ChatRequest {
@@ -149,4 +157,6 @@ export interface ChatRequest {
   history: Array<{ role: string; content: string }>;
   file_type: FileType | null;
   song_bpm: number | null;
+  session_tracks: TrackSummary[];
+  focused_track: string | null;
 }

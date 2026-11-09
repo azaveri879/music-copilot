@@ -9,9 +9,9 @@ import soundfile as sf
 from fastapi.testclient import TestClient
 
 from main import app
-from models.schemas import AudioFeatures, AudioRegion, FrequencyProfile, TimingIssue
+from models.schemas import TrackSummary, AudioFeatures, AudioRegion, FrequencyProfile, TimingIssue
 from services import ai_service
-from services.ai_service import build_audio_context
+from services.ai_service import build_audio_context, build_session_context
 
 client = TestClient(app)
 
@@ -447,3 +447,111 @@ def test_audio_context_includes_spectrum_detail_and_peak_moments():
     assert "sub (20-60 Hz) -31.4" in ctx
     assert "158, 621 Hz" in ctx
     assert "125.31s (-0.1 dBFS)" in ctx
+
+
+def track(name, lufs, ranges, bands=None, freqs=None):
+    return {
+        "name": name,
+        "features": {
+            "session_id": name, "duration": 60.0, "sample_rate": 48000, "loudness_lufs": lufs, "peak_dbfs": -3.0,
+            "active_ranges": [{"start": s, "end": e} for s, e in ranges],
+            "band_levels": [
+                {"name": n, "low_hz": 100, "high_hz": 200, "level_db": level} for n, level in (bands or [])
+            ],
+            "prominent_frequencies_hz": freqs or [],
+        },
+    }
+
+
+def session(*tracks):
+    return [TrackSummary.model_validate(t) for t in tracks]
+
+
+def test_session_context_compares_tracks_that_play_together():
+    bands = [("low-mid", 0.0), ("mid", -6.0)]
+    ctx = build_session_context(session(
+        track("Vocal", -20.0, [(0, 40)], bands, [300.0]),
+        track("Guitar", -23.5, [(10, 30)], bands, [305.0]),
+    ))
+    assert "All 2 tracks" in ctx
+    assert "**Vocal:** -20.0 LUFS" in ctx
+    assert "Median track loudness:** -21.8 LUFS" in ctx
+    assert "Vocal + Guitar: 3.5 dB apart, 20s together, both strongest in low-mid, both prominent near 300 Hz" in ctx
+
+
+def test_session_context_skips_tracks_that_barely_overlap():
+    ctx = build_session_context(session(track("A", -20.0, [(0, 10)]), track("B", -20.0, [(8, 20)])))
+    assert "A + B" not in ctx
+
+
+def test_session_context_lists_closest_levels_first():
+    ctx = build_session_context(session(
+        track("A", -20.0, [(0, 30)]), track("B", -30.0, [(0, 30)]), track("C", -21.0, [(0, 30)])
+    ))
+    assert ctx.index("A + C") < ctx.index("A + B")
+
+
+def test_session_context_handles_tracks_with_no_loudness():
+    ctx = build_session_context(session(track("Silent", None, []), track("B", -20.0, [(0, 30)])))
+    assert "**Silent:** loudness unknown" in ctx
+    assert "Silent + B" not in ctx
+
+
+def test_positions_include_bars_when_the_tempo_is_known():
+    features = AudioFeatures(
+        session_id="s", duration=4.0, sample_rate=44100, peak_moments=[{"timestamp": 118.71, "level_dbfs": -0.1}]
+    )
+    assert "118.71s, bar 49 beat 2.9 (-0.1 dBFS)" in build_audio_context(features, None, song_bpm=98.0)
+    assert "118.71s (-0.1 dBFS)" in build_audio_context(features, None)
+
+
+def test_chat_about_the_whole_song_sends_every_track_and_offers_no_edits(fake_anthropic):
+    client.post("/chat", json={
+        "session_id": "s",
+        "message": "What's clashing?",
+        "session_tracks": [track("Vocal", -20.0, [(0, 40)]), track("Guitar", -23.5, [(0, 40)])],
+        "song_bpm": 98,
+    })
+    body = fake_anthropic["requests"][0]["body"]
+    assert "Vocal + Guitar" in str(body["messages"][-1]["content"])
+    assert "What's clashing?" in str(body["messages"][-1]["content"])
+    assert "tools" not in body
+
+
+def test_chat_about_a_focused_track_includes_the_other_tracks(fake_anthropic):
+    client.post("/chat", json={
+        "session_id": "s",
+        "message": "Fix this one",
+        "audio_features": {"session_id": "s", "duration": 4.0, "sample_rate": 44100},
+        "session_tracks": [track("Vocal", -20.0, [(0, 40)]), track("Guitar", -23.5, [(0, 40)])],
+        "focused_track": "Guitar",
+    })
+    body = fake_anthropic["requests"][0]["body"]
+    content = str(body["messages"][-1]["content"])
+    assert "**Focused track:** Guitar" in content
+    assert "Vocal + Guitar" in content
+    assert "tools" in body
+
+
+def test_chat_rejects_too_many_tracks():
+    tracks = [track(f"T{i}", -20.0, []) for i in range(41)]
+    assert client.post("/chat", json={"session_id": "s", "message": "Hi", "session_tracks": tracks}).status_code == 422
+
+
+def test_analyze_can_skip_keeping_the_audio(write_wav, click_track):
+    from services import audio_store
+
+    with open(write_wav(click_track(4)), "rb") as f:
+        content = f.read()
+    upload = {"file": ("a.wav", content, "audio/wav")}
+    kept = client.post("/analyze", files=upload).json()["session_id"]
+    skipped = client.post("/analyze", files=upload, data={"remember": "false"}).json()["session_id"]
+    assert audio_store.recall(kept) is not None
+    assert audio_store.recall(skipped) is None
+
+
+def test_position_just_before_a_barline_rolls_over_to_the_next_bar():
+    features = AudioFeatures(
+        session_id="s", duration=4.0, sample_rate=44100, peak_moments=[{"timestamp": 14.68, "level_dbfs": -9.4}]
+    )
+    assert "bar 7 beat 1.0" in build_audio_context(features, None, song_bpm=98.0)

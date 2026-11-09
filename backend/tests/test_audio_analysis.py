@@ -348,3 +348,22 @@ def test_silence_has_no_spectrum_detail_or_peaks(write_wav):
     assert features.band_levels == []
     assert features.prominent_frequencies_hz == []
     assert features.peak_moments == []
+
+
+def test_active_ranges_find_when_the_part_plays(write_wav):
+    y = np.concatenate([np.zeros(2 * SR), tone(440, 3.0), np.zeros(4 * SR), tone(440, 2.0)])
+    ranges = analyze_audio(write_wav(y)).active_ranges
+    assert [(r.start, r.end) for r in ranges] == [
+        pytest.approx((2.0, 5.0), abs=0.1), pytest.approx((9.0, 11.0), abs=0.1)
+    ]
+
+
+def test_active_ranges_merge_short_pauses(write_wav):
+    y = np.concatenate([tone(440, 2.0), np.zeros(SR // 2), tone(440, 2.0)])
+    assert len(analyze_audio(write_wav(y)).active_ranges) == 1
+
+
+def test_active_ranges_are_positions_in_the_file_for_a_region(write_wav):
+    y = np.concatenate([np.zeros(2 * SR), tone(440, 6.0)])
+    ranges = analyze_audio(write_wav(y), start_time=1.0, end_time=5.0).active_ranges
+    assert (ranges[0].start, ranges[0].end) == (pytest.approx(2.0, abs=0.1), pytest.approx(5.0, abs=0.1))

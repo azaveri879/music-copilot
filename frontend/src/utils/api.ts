@@ -6,6 +6,7 @@ const UNREACHABLE = `Can't reach the backend at ${API_BASE}. Is it running?`;
 interface AnalyzeOptions {
   start?: number;
   end?: number;
+  remember?: boolean;
   signal?: AbortSignal;
 }
 
@@ -25,11 +26,12 @@ async function post(path: string, init: RequestInit, fallbackError: string) {
   return res;
 }
 
-export async function analyzeAudio(file: File, { start, end, signal }: AnalyzeOptions = {}): Promise<AudioFeatures> {
+export async function analyzeAudio(file: File, { start, end, remember, signal }: AnalyzeOptions = {}): Promise<AudioFeatures> {
   const formData = new FormData();
   formData.append("file", file);
   if (start !== undefined) formData.append("start_time", String(start));
   if (end !== undefined) formData.append("end_time", String(end));
+  if (remember !== undefined) formData.append("remember", String(remember));
 
   const res = await post("/analyze", { body: formData, signal }, "Audio analysis failed");
   return res.json();

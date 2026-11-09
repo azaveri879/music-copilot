@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, KeyboardEvent } from "react";
-import { ChatMessage, AudioFeatures, AudioRegion } from "../types";
+import { ChatMessage, AudioRegion } from "../types";
 import { formatTime } from "../utils/format";
 import { ProposalHandlers } from "./EditProposalCard";
 import { MessageBubble } from "./MessageBubble";
@@ -9,7 +9,8 @@ interface ChatPanelProps {
   messages: ChatMessage[];
   isStreaming: boolean;
   error: string | null;
-  audioFeatures: AudioFeatures | null;
+  canAsk: boolean;
+  isSongView: boolean;
   tempo: number | null;
   musicalKey: string | null;
   selectedRegion: AudioRegion | null;
@@ -23,7 +24,8 @@ export function ChatPanel({
   messages,
   isStreaming,
   error,
-  audioFeatures,
+  canAsk,
+  isSongView,
   tempo,
   musicalKey,
   selectedRegion,
@@ -41,7 +43,7 @@ export function ChatPanel({
   }, [messages]);
 
   // Hold questions until the numbers describe the current selection.
-  const canSend = !!input.trim() && !!audioFeatures && !isStreaming && !isAnalyzingRegion;
+  const canSend = !!input.trim() && canAsk && !isStreaming && !isAnalyzingRegion;
 
   const handleSend = () => {
     if (!canSend) return;
@@ -78,13 +80,27 @@ export function ChatPanel({
         {messages.length === 0 && (
           <div className="text-center space-y-3 py-12">
             <p className="text-gray-500 text-sm">
-              {audioFeatures ? "What are you hearing, or going for?" : "Upload a track to get started."}
+              {canAsk
+                ? isSongView
+                  ? "What do you want to know about the whole song?"
+                  : "What are you hearing, or going for?"
+                : "Upload a track to get started."}
             </p>
             <div className="text-xs text-gray-600 space-y-1">
               <p>Try asking:</p>
-              <p className="italic">"This guitar feels off beat in the intro"</p>
-              <p className="italic">"I want this to feel dark and lo-fi"</p>
-              <p className="italic">"The vocals are too harsh — what should I cut?"</p>
+              {isSongView ? (
+                <>
+                  <p className="italic">"Which tracks are too loud or too quiet?"</p>
+                  <p className="italic">"What's competing with what?"</p>
+                  <p className="italic">"Where should I start on this mix?"</p>
+                </>
+              ) : (
+                <>
+                  <p className="italic">"This guitar feels off beat in the intro"</p>
+                  <p className="italic">"I want this to feel dark and lo-fi"</p>
+                  <p className="italic">"The vocals are too harsh — what should I cut?"</p>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -107,12 +123,14 @@ export function ChatPanel({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={!audioFeatures || isStreaming}
+            disabled={!canAsk || isStreaming}
             placeholder={
-              audioFeatures
-                ? selectedRegion
-                  ? "Ask about the selected region…"
-                  : "Describe what's wrong or what vibe you're going for…"
+              canAsk
+                ? isSongView
+                  ? "Ask about the whole song…"
+                  : selectedRegion
+                    ? "Ask about the selected region…"
+                    : "Describe what's wrong or what vibe you're going for…"
                 : "Upload a track to start"
             }
             rows={2}

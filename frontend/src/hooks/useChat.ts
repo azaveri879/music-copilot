@@ -55,6 +55,8 @@ export function useChat(sessionId: string) {
           history,
           file_type: context.fileType,
           song_bpm: context.songBpm,
+          session_tracks: context.sessionTracks,
+          focused_track: context.focusedTrack,
         });
 
         for await (const event of stream) {

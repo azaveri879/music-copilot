@@ -2,13 +2,15 @@ import dataclasses
 import json
 import logging
 from functools import lru_cache
+from itertools import combinations
+from statistics import median
 from typing import AsyncGenerator
 
 import anthropic
 from fastapi.concurrency import run_in_threadpool
 from pydantic import ValidationError
 
-from models.schemas import AudioFeatures, AudioRegion, ChatHistoryItem, EditProposal, FileType
+from models.schemas import AudioFeatures, AudioRegion, ChatHistoryItem, EditProposal, FileType, TrackSummary
 from services import audio_store
 from services.audio_analysis import AudioDecodeError, InvalidRegionError
 from services.audio_editing import EditError, estimate_edits
@@ -19,6 +21,9 @@ MODEL = "claude-opus-5-5"
 MAX_TOKENS = 64000
 MAX_PROPOSAL_ROUNDS = 3  # Claude's first attempt, and up to two revisions after seeing measurements
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+MIN_OVERLAP_SECONDS = 5.0  # less than this together is too brief to count as competing
+MAX_TRACK_PAIRS = 15
+SAME_FREQUENCY_HZ = 10.0
 
 SYSTEM_PROMPT = """You are Music Copilot, an expert AI production assistant for musicians and producers who use Logic Pro.
 
@@ -33,6 +38,10 @@ Your role is to bridge the gap between creative vision and technical execution â
 **Reference the audio data, and be honest about its limits.** When the analysis shows something relevant, say so. The figures are automated estimates of a bounced file: you can't hear the audio, see the session, or tell which instrument made a sound. A detected key can land on the relative major or minor, tempo can be read at half or double time, and flagged timing issues are candidates to check by ear rather than confirmed mistakes. Never claim to have heard something the data doesn't show.
 
 **Use the detail you're given.** Band levels show how much is in each range. If a band is already far below the loudest, cutting or filtering it will do little, so don't offer that as a fix. Prominent frequencies are where energy concentrates, which may simply be the notes being played, so treat them as places to check rather than as confirmed problems. Loudest moments show where the peak level comes from, so name those timestamps instead of saying you can't tell where the peaks are.
+
+**Put steps in order.** If one step will change a reading a later step relies on, have the user re-check before going on. Trimming a hot passage lowers the measured dynamic range, for example, so don't prescribe compression from the number measured before the trim.
+
+**Use bars when you have them.** When a position includes a bar number, lead with the bar, since that's how the user finds a spot in Logic. Bar numbers assume 4/4 and that the file starts at bar 1, so say so the first time you use them.
 
 **Don't lean on unreliable readings.** When tempo or key is marked as not reliably detected, don't guess at it or base advice on it. If a tempo is marked as set by the user, treat it as correct.
 
@@ -49,6 +58,16 @@ Your role is to bridge the gap between creative vision and technical execution â
 **Use Logic Pro specifics.** Name real stock tools (Channel EQ, Linear Phase EQ, Compressor, Multipressor, DeEsser 2, Adaptive Limiter, Space Designer, ChromaVerb, Tape Delay, Phat FX, Bitcrusher, Flex Time, Flex Pitch, Smart Tempo), real menu locations, and approximate parameter values. If you're not sure a parameter or preset exists under a given name, describe what to adjust rather than inventing a name.
 
 **Be conversational.** You're a production partner, not a manual. Keep it tight and readable.
+
+## Working across a whole song
+
+You may be given measurements for every track in the song.
+
+- Compare the tracks by name: which are too loud or quiet relative to the others, and which compete, meaning they play together at similar levels and share a strongest band or frequencies. A track that's much quieter than another isn't competing with it, it's being covered by it.
+- Give level moves as specific dB changes per track. You can't change the session or render the song yourself.
+- These are exported tracks, so they may not reflect fader settings, panning or bus effects. A level difference may already be handled in the session, so say so when it would change your advice, and flag a track that's far quieter than the rest as something to check.
+- Don't assume competition is a problem. Two parts in the same range can be a deliberate choice, so describe it and let the user's ears decide.
+- If a track is focused, answer about that track and use the others as context. If none is focused, answer about the song. You can't propose edits without a focused track, so if the user wants one tried, tell them to click that track in the list.
 
 ## Format guidelines
 
@@ -137,6 +156,93 @@ FILE_TYPE_DESCRIPTIONS: dict[FileType, str] = {
 }
 
 
+def _position(seconds: float, song_bpm: float | None) -> str:
+    """A position in the file, with its bar when the song's tempo is known."""
+    if song_bpm is None:
+        return f"{seconds:.2f}s"
+    # Round before splitting, so a moment just before a barline can't read as beat 5.0.
+    bar, beat = divmod(round(seconds * song_bpm / 60, 1), 4)
+    return f"{seconds:.2f}s, bar {int(bar) + 1} beat {beat + 1:.1f}"
+
+
+def _clean_name(name: str) -> str:
+    return " ".join(name.split())[:80]
+
+
+def _seconds_playing(features: AudioFeatures) -> float:
+    return sum(r.end - r.start for r in features.active_ranges)
+
+
+def _seconds_together(a: AudioFeatures, b: AudioFeatures) -> float:
+    return sum(
+        max(0.0, min(x.end, y.end) - max(x.start, y.start)) for x in a.active_ranges for y in b.active_ranges
+    )
+
+
+def _loudest_band(features: AudioFeatures) -> str | None:
+    return max(features.band_levels, key=lambda b: b.level_db).name if features.band_levels else None
+
+
+def _describe_track(track: TrackSummary, song_bpm: float | None) -> str:
+    f = track.features
+    parts = [
+        f"{f.loudness_lufs} LUFS" if f.loudness_lufs is not None else "loudness unknown",
+        f"peak {f.peak_dbfs} dBFS" if f.peak_dbfs is not None else "peak unknown",
+        f"playing for {_seconds_playing(f):.0f}s of {f.duration:.0f}s",
+    ]
+    if f.peak_moments:
+        loudest = max(f.peak_moments, key=lambda m: m.level_dbfs)
+        parts.append(f"loudest at {_position(loudest.timestamp, song_bpm)}")
+    if f.band_levels:
+        parts.append("bands " + ", ".join(f"{b.name} {b.level_db:+.0f}" for b in f.band_levels))
+    if f.prominent_frequencies_hz:
+        parts.append("prominent " + ", ".join(f"{hz:.0f}" for hz in f.prominent_frequencies_hz) + " Hz")
+    return f"- **{_clean_name(track.name)}:** " + "; ".join(parts)
+
+
+def _describe_pairs(tracks: list[TrackSummary]) -> list[str]:
+    """Tracks that play together, closest in level first, since those are the likeliest to compete."""
+    pairs = []
+    for a, b in combinations(tracks, 2):
+        together = _seconds_together(a.features, b.features)
+        la, lb = a.features.loudness_lufs, b.features.loudness_lufs
+        if together < MIN_OVERLAP_SECONDS or la is None or lb is None:
+            continue
+
+        details = [f"{abs(la - lb):.1f} dB apart", f"{together:.0f}s together"]
+        band_a, band_b = _loudest_band(a.features), _loudest_band(b.features)
+        if band_a and band_a == band_b:
+            details.append(f"both strongest in {band_a}")
+        shared = [
+            f for f in a.features.prominent_frequencies_hz
+            if any(abs(f - other) <= SAME_FREQUENCY_HZ for other in b.features.prominent_frequencies_hz)
+        ]
+        if shared:
+            details.append("both prominent near " + ", ".join(f"{f:.0f}" for f in shared) + " Hz")
+        pairs.append((abs(la - lb), f"- {_clean_name(a.name)} + {_clean_name(b.name)}: " + ", ".join(details)))
+
+    return [line for _, line in sorted(pairs, key=lambda p: p[0])[:MAX_TRACK_PAIRS]]
+
+
+def build_session_context(tracks: list[TrackSummary], song_bpm: float | None = None) -> str:
+    """Format every track in the song, and how they relate, as a context block for the AI."""
+    lines = [f"## All {len(tracks)} tracks in this song"]
+    if song_bpm is not None:
+        lines.append(f"**BPM:** {song_bpm:g} (set by the user)")
+
+    loudness = [t.features.loudness_lufs for t in tracks if t.features.loudness_lufs is not None]
+    if loudness:
+        lines.append(f"**Median track loudness:** {median(loudness):.1f} LUFS")
+    lines.extend(_describe_track(track, song_bpm) for track in tracks)
+
+    pairs = _describe_pairs(tracks)
+    if pairs:
+        lines.append("\n**Tracks playing together, closest in level first:**")
+        lines.extend(pairs)
+
+    return "\n".join(lines)
+
+
 def build_audio_context(
     features: AudioFeatures,
     region: AudioRegion | None,
@@ -184,7 +290,7 @@ def build_audio_context(
         freqs = ", ".join(f"{f:.0f}" for f in features.prominent_frequencies_hz)
         lines.append(f"**Prominent frequencies (80-1000 Hz):** {freqs} Hz")
     if features.peak_moments:
-        moments = ", ".join(f"{m.timestamp:.2f}s ({m.level_dbfs} dBFS)" for m in features.peak_moments)
+        moments = ", ".join(f"{_position(m.timestamp, song_bpm)} ({m.level_dbfs} dBFS)" for m in features.peak_moments)
         lines.append(f"**Loudest moments:** {moments}")
 
     if not features.timing_checked:
@@ -193,7 +299,7 @@ def build_audio_context(
         lines.append("\n**Timing:** no likely issues found against a steady tempo grid.")
     else:
         lines.append(f"\n**Possible timing issues ({len(features.timing_issues)}):**")
-        lines.extend(f"  - {issue.timestamp:.2f}s: {issue.description}" for issue in features.timing_issues)
+        lines.extend(f"  - {_position(issue.timestamp, song_bpm)}: {issue.description}" for issue in features.timing_issues)
 
     return "\n".join(lines)
 
@@ -233,6 +339,8 @@ async def stream_chat_response(
     history: list[ChatHistoryItem],
     file_type: FileType | None = None,
     song_bpm: float | None = None,
+    session_tracks: list[TrackSummary] | None = None,
+    focused_track: str | None = None,
 ) -> AsyncGenerator[str | EditProposal, None]:
     """
     Stream a response from Claude, with audio analysis as context.
@@ -244,10 +352,13 @@ async def stream_chat_response(
     # An interrupted reply can leave an empty assistant turn, which the API rejects.
     messages = [{"role": item.role, "content": item.content} for item in history if item.content.strip()]
 
-    user_content = message
+    contexts = []
+    if session_tracks:
+        contexts.append(build_session_context(session_tracks, song_bpm))
     if audio_features:
         audio_ctx = build_audio_context(audio_features, region, file_type, song_bpm)
-        user_content = f"{audio_ctx}\n\n---\n\n**User question:** {message}"
+        contexts.append(f"**Focused track:** {_clean_name(focused_track)}\n\n{audio_ctx}" if focused_track else audio_ctx)
+    user_content = "\n\n".join(contexts) + f"\n\n---\n\n**User question:** {message}" if contexts else message
 
     messages.append({"role": "user", "content": user_content})
 

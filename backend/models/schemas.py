@@ -50,6 +50,7 @@ class AudioFeatures(BaseModel):
     band_levels: list[BandLevel] = []
     prominent_frequencies_hz: list[float] = []
     peak_moments: list[PeakMoment] = []
+    active_ranges: list[AudioRegion] = []  # when the part is playing, as positions in the file
 
 
 class GainEdit(BaseModel):
@@ -108,6 +109,13 @@ class ChatHistoryItem(BaseModel):
 
 FileType = Literal["track", "mix", "master"]
 
+MAX_SESSION_TRACKS = 40
+
+
+class TrackSummary(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    features: AudioFeatures
+
 
 class ChatRequest(BaseModel):
     session_id: str
@@ -117,3 +125,5 @@ class ChatRequest(BaseModel):
     history: list[ChatHistoryItem] = []
     file_type: Optional[FileType] = None
     song_bpm: Optional[float] = Field(default=None, ge=20, le=300)  # the tempo the user says the song is
+    session_tracks: list[TrackSummary] = Field(default=[], max_length=MAX_SESSION_TRACKS)  # every track in the song
+    focused_track: Optional[str] = Field(default=None, max_length=255)  # which of them audio_features describes

@@ -320,6 +320,7 @@ Accepts an audio file upload. Returns structured audio features.
 - `file`: audio file (`.wav`, `.mp3`, `.aiff`, `.aif`, `.flac`)
 - `start_time` *(optional)*: float, start of region in seconds
 - `end_time` *(optional)*: float, end of region in seconds
+- `remember` *(optional)*: boolean, default `true`. `false` skips holding the audio for measuring proposed edits, for analyzing many tracks at once
 
 `timing_issues` are candidates to check by ear. They're measured against a grid at the single tempo that best fits the track. If no steady tempo fits, `timing_checked` is `false` and no issues are reported, rather than guessing against an unreliable grid. Notes near the midpoint between grid lines and unusually quiet attacks are left out, and an exact digital loop reports each spot once.
 
@@ -359,6 +360,9 @@ With a region, `bpm` and the beat grid come from the whole track. `timing_issues
   "prominent_frequencies_hz": [158, 188, 305, 621],
   "peak_moments": [
     { "timestamp": 125.31, "level_dbfs": -0.1 }
+  ],
+  "active_ranges": [
+    { "start": 50.3, "end": 62.1 }
   ]
 }
 ```
@@ -428,11 +432,15 @@ Sends a user message and streams back an AI response using Server-Sent Events (S
     { "role": "assistant", "content": "..." }
   ],
   "file_type": "track",
-  "song_bpm": 98
+  "song_bpm": 98,
+  "session_tracks": [
+    { "name": "Guitar", "features": { ... } }
+  ],
+  "focused_track": "Guitar"
 }
 ```
 
-`file_type` (`track`, `mix` or `master`) and `song_bpm` (20–300) are optional. They're what the user told the app about the audio, and `song_bpm` replaces the detected tempo.
+`file_type` (`track`, `mix` or `master`) and `song_bpm` (20–300) are optional. They're what the user told the app about the audio, and `song_bpm` replaces the detected tempo and adds bar numbers to positions. `session_tracks` (up to 40) gives Claude every track in the song, and `focused_track` names the one `audio_features` describes. With no `audio_features`, the question is about the whole song and Claude can't propose edits.
 
 **Response:** `text/event-stream`
 ```
@@ -458,7 +466,7 @@ Failures after the stream has started arrive as `data: {"type": "error", "conten
 - [x] Session context (conversation memory within a session)
 
 ### v2 — Deeper Analysis
-- [ ] Stem-aware analysis (upload individual tracks)
+- [x] Stem-aware analysis (upload individual tracks)
 - [ ] Reference track upload ("make mine sound like this")
 - [ ] Pitch correction guidance (detect off-key notes with timestamps)
 - [ ] Clip gain and automation suggestions

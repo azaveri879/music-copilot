@@ -8,7 +8,7 @@ import pyloudnorm
 import soundfile as sf
 from scipy.signal import find_peaks, medfilt
 
-from models.schemas import AudioFeatures, BandLevel, FrequencyProfile, PeakMoment, TimingIssue
+from models.schemas import AudioFeatures, AudioRegion, BandLevel, FrequencyProfile, PeakMoment, TimingIssue
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,10 @@ PEAK_BLOCK = 256
 PEAK_MIN_SPACING_S = 0.5
 PEAK_WITHIN_DB = 6.0  # only moments close to the loudest one explain the peak level
 MAX_PEAK_MOMENTS = 5
+
+ACTIVE_HOP = 512
+ACTIVE_MERGE_GAP_S = 1.0  # shorter pauses are part of the same phrase
+ACTIVE_MIN_RANGE_S = 0.25
 
 # Positions within a beat that count as "on the grid": straight 16ths plus
 # triplets, so swung or triplet parts aren't reported as mistimed.
@@ -469,6 +473,30 @@ def find_peak_moments(y: np.ndarray, sr: int, start: float = 0.0) -> list[PeakMo
     ]
 
 
+def find_active_ranges(y: np.ndarray, sr: int, start: float = 0.0) -> list[AudioRegion]:
+    """When the part is playing, as positions in the file. `start` is where `y` begins in the file."""
+    if is_silent(y):
+        return []
+
+    rms = librosa.feature.rms(y=y, hop_length=ACTIVE_HOP)[0]
+    active = _within_active_gate(20 * np.log10(np.maximum(rms, 1e-12)))
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], active.astype(int), [0]])))
+
+    ranges: list[list[float]] = []
+    for on, off in zip(edges[::2], edges[1::2]):
+        begin, end = float(on) * ACTIVE_HOP / sr, min(float(off) * ACTIVE_HOP / sr, y.size / sr)
+        if ranges and begin - ranges[-1][1] <= ACTIVE_MERGE_GAP_S:
+            ranges[-1][1] = end
+        else:
+            ranges.append([begin, end])
+
+    return [
+        AudioRegion(start=round(start + begin, 2), end=round(start + end, 2))
+        for begin, end in ranges
+        if end - begin >= ACTIVE_MIN_RANGE_S
+    ]
+
+
 def analyze_audio(
     audio_path: str,
     start_time: float | None = None,
@@ -538,4 +566,5 @@ def analyze_audio(
         band_levels=band_levels,
         prominent_frequencies_hz=prominent_frequencies,
         peak_moments=find_peak_moments(region, sr, start),
+        active_ranges=find_active_ranges(mono_region, sr, start),
     )
