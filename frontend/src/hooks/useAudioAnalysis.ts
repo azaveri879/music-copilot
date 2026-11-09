@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AudioFeatures, AudioRegion } from "../types";
 import { analyzeAudio } from "../utils/api";
 
@@ -9,22 +9,25 @@ const REGION_DEBOUNCE_MS = 300;
  * track is analyzed once per file; each region gets its own analysis, so the
  * copilot's numbers describe what the user actually selected.
  */
-export function useAudioAnalysis(file: File | null, region: AudioRegion | null) {
+export function useAudioAnalysis(file: File | null, region: AudioRegion | null, songBpm: number | null) {
   const [trackFeatures, setTrackFeatures] = useState<AudioFeatures | null>(null);
   const [regionFeatures, setRegionFeatures] = useState<AudioFeatures | null>(null);
   const [isAnalyzingTrack, setIsAnalyzingTrack] = useState(false);
   const [isAnalyzingRegion, setIsAnalyzingRegion] = useState(false);
   const [trackError, setTrackError] = useState<string | null>(null);
   const [regionError, setRegionError] = useState<string | null>(null);
+  const measuredFile = useRef<File | null>(null);
 
   useEffect(() => {
-    setTrackFeatures(null);
+    // A new tempo re-measures the same file, so keep showing its numbers until the update arrives.
+    if (measuredFile.current !== file) setTrackFeatures(null);
+    measuredFile.current = file;
     setTrackError(null);
     if (!file) return;
 
     const controller = new AbortController();
     setIsAnalyzingTrack(true);
-    analyzeAudio(file, { signal: controller.signal })
+    analyzeAudio(file, { songBpm, signal: controller.signal })
       .then(setTrackFeatures)
       .catch((err) => {
         if (!controller.signal.aborted) setTrackError(errorMessage(err));
@@ -34,7 +37,7 @@ export function useAudioAnalysis(file: File | null, region: AudioRegion | null) 
       });
 
     return () => controller.abort();
-  }, [file]);
+  }, [file, songBpm]);
 
   useEffect(() => {
     setRegionFeatures(null);
@@ -45,7 +48,7 @@ export function useAudioAnalysis(file: File | null, region: AudioRegion | null) 
     const controller = new AbortController();
     // Wait for the selection to settle: resizing a region fires repeatedly.
     const timer = setTimeout(() => {
-      analyzeAudio(file, { start: region.start, end: region.end, signal: controller.signal })
+      analyzeAudio(file, { start: region.start, end: region.end, songBpm, signal: controller.signal })
         .then(setRegionFeatures)
         .catch((err) => {
           if (!controller.signal.aborted) setRegionError(errorMessage(err));
@@ -59,7 +62,7 @@ export function useAudioAnalysis(file: File | null, region: AudioRegion | null) 
       clearTimeout(timer);
       controller.abort();
     };
-  }, [file, region]);
+  }, [file, region, songBpm]);
 
   return {
     trackFeatures,

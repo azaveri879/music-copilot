@@ -7,6 +7,7 @@ interface AnalyzeOptions {
   start?: number;
   end?: number;
   remember?: boolean;
+  songBpm?: number | null;
   signal?: AbortSignal;
 }
 
@@ -26,12 +27,13 @@ async function post(path: string, init: RequestInit, fallbackError: string) {
   return res;
 }
 
-export async function analyzeAudio(file: File, { start, end, remember, signal }: AnalyzeOptions = {}): Promise<AudioFeatures> {
+export async function analyzeAudio(file: File, { start, end, remember, songBpm, signal }: AnalyzeOptions = {}): Promise<AudioFeatures> {
   const formData = new FormData();
   formData.append("file", file);
   if (start !== undefined) formData.append("start_time", String(start));
   if (end !== undefined) formData.append("end_time", String(end));
   if (remember !== undefined) formData.append("remember", String(remember));
+  if (songBpm != null) formData.append("song_bpm", String(songBpm));
 
   const res = await post("/analyze", { body: formData, signal }, "Audio analysis failed");
   return res.json();

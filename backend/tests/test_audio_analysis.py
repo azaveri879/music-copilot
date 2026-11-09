@@ -367,3 +367,34 @@ def test_active_ranges_are_positions_in_the_file_for_a_region(write_wav):
     y = np.concatenate([np.zeros(2 * SR), tone(440, 6.0)])
     ranges = analyze_audio(write_wav(y), start_time=1.0, end_time=5.0).active_ranges
     assert (ranges[0].start, ranges[0].end) == (pytest.approx(2.0, abs=0.1), pytest.approx(5.0, abs=0.1))
+
+
+def test_a_known_tempo_replaces_the_detected_one(write_wav):
+    features = analyze_audio(write_wav(loop_98_bpm()), song_bpm=98.0)
+    assert features.bpm == 98.0
+    assert features.bpm_confident
+    assert features.timing_checked
+
+
+def test_a_known_tempo_still_finds_a_late_note(write_wav):
+    issues = analyze_audio(write_wav(loop_98_bpm(late_note_ms=40)), song_bpm=98.0).timing_issues
+    assert len(issues) >= 1
+    assert "late" in issues[0].description
+
+
+def test_timing_is_not_checked_when_a_known_tempo_does_not_fit(write_wav):
+    features = analyze_audio(write_wav(loop_98_bpm()), song_bpm=71.0)
+    assert features.bpm == 71.0
+    assert not features.timing_checked
+    assert features.timing_issues == []
+
+
+def test_barely_fitting_tempo_is_not_confident(monkeypatch, write_wav):
+    from services import audio_analysis
+
+    monkeypatch.setattr(
+        audio_analysis, "_fit_constant_tempo", lambda onsets, bpm, exact=False: (5.5 / np.sqrt(len(onsets)), 98.0, 0.0, 4)
+    )
+    features = analyze_audio(write_wav(loop_98_bpm()))
+    assert not features.bpm_confident
+    assert not features.timing_checked

@@ -108,6 +108,7 @@ async def analyze_endpoint(
     start_time: float | None = Form(None),
     end_time: float | None = Form(None),
     remember: bool = Form(True),  # False keeps a bulk analysis from evicting the track being worked on
+    song_bpm: float | None = Form(None, ge=20, le=300),  # measures timing against this instead of a detected tempo
 ):
     content, suffix = await read_upload(file)
 
@@ -124,6 +125,7 @@ async def analyze_endpoint(
             start_time=start_time,
             end_time=end_time,
             session_id=session_id,
+            song_bpm=song_bpm,
         )
         if remember:
             audio_store.remember(session_id, content)

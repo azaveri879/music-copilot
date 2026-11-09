@@ -321,6 +321,7 @@ Accepts an audio file upload. Returns structured audio features.
 - `start_time` *(optional)*: float, start of region in seconds
 - `end_time` *(optional)*: float, end of region in seconds
 - `remember` *(optional)*: boolean, default `true`. `false` skips holding the audio for measuring proposed edits, for analyzing many tracks at once
+- `song_bpm` *(optional)*: float, 20–300. Measures timing against this tempo instead of a detected one
 
 `timing_issues` are candidates to check by ear. They're measured against a grid at the single tempo that best fits the track. If no steady tempo fits, `timing_checked` is `false` and no issues are reported, rather than guessing against an unreliable grid. Notes near the midpoint between grid lines and unusually quiet attacks are left out, and an exact digital loop reports each spot once.
 

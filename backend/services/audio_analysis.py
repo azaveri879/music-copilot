@@ -69,7 +69,9 @@ TEMPO_SEARCH_RANGE = 0.06  # stay near the tracker's tempo, which sets the half/
 MAX_PLAUSIBLE_BPM = 180  # above this, the tracker has almost certainly doubled the tempo
 # A real rhythmic pattern has to line up far better than random onsets would. Random
 # onsets average about 1/sqrt(n) on the fit score.
-TEMPO_FIT_MIN_TIMES_CHANCE = 4
+TEMPO_FIT_MIN_TIMES_CHANCE = 6  # searching many tempos inflates the best score, so the bar is high
+KNOWN_TEMPO_FIT_MIN_TIMES_CHANCE = 4  # with the tempo given there's no search to compensate for
+TEMPO_FIT_CLEARLY_TIGHT = 0.65  # this tight is a real pattern even with too few notes to beat the bar above
 # A rigid grid is only trusted if local stretches of the track stay this close to it.
 # Without one there's no reliable reference to judge timing against.
 GRID_DRIFT_WINDOW_SECONDS = 8.0
@@ -148,9 +150,10 @@ def detect_onsets(y: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray]:
     return librosa.frames_to_time(frames, sr=sr, hop_length=ONSET_HOP_LENGTH), envelope[frames]
 
 
-def _fit_constant_tempo(onsets: np.ndarray, near_bpm: float) -> tuple[float, float, float, int]:
+def _fit_constant_tempo(onsets: np.ndarray, near_bpm: float, exact: bool = False) -> tuple[float, float, float, int]:
     """
-    Find the single tempo whose subdivisions best line up with the onsets.
+    Find the single tempo whose subdivisions best line up with the onsets, or with
+    `exact`, how well they line up with `near_bpm` itself.
 
     Each onset becomes a point on a circle one subdivision long. At the right tempo
     the points pile up in one place, and the length of their average measures how
@@ -162,11 +165,15 @@ def _fit_constant_tempo(onsets: np.ndarray, near_bpm: float) -> tuple[float, flo
         units = 60 / bpms / subdivisions
         return np.exp(2j * np.pi * onsets[None, :] / units[:, None]).mean(axis=1)
 
-    coarse = np.arange(near_bpm * (1 - TEMPO_SEARCH_RANGE), near_bpm * (1 + TEMPO_SEARCH_RANGE), 0.01)
+    coarse = (
+        np.array([near_bpm])
+        if exact
+        else np.arange(near_bpm * (1 - TEMPO_SEARCH_RANGE), near_bpm * (1 + TEMPO_SEARCH_RANGE), 0.01)
+    )
     best = (-1.0, near_bpm, 0.0, 4)
     for subdivisions in (4, 3):
         rough = coarse[np.abs(score(coarse, subdivisions)).argmax()]
-        fine = np.arange(rough - 0.02, rough + 0.02, 0.001)
+        fine = np.array([rough]) if exact else np.arange(rough - 0.02, rough + 0.02, 0.001)
         phasors = score(fine, subdivisions)
         i = int(np.abs(phasors).argmax())
         if abs(phasors[i]) > best[0]:
@@ -197,7 +204,7 @@ def measure_grid_drift_ms(onsets: np.ndarray, bpm: float, subdivisions: int, pos
 
 
 def estimate_rhythm(
-    y: np.ndarray, sr: int, onsets: np.ndarray, strengths: np.ndarray
+    y: np.ndarray, sr: int, onsets: np.ndarray, strengths: np.ndarray, known_bpm: float | None = None
 ) -> tuple[float | None, np.ndarray, bool, bool]:
     """
     Return the tempo in BPM, the beat times in seconds, whether the tempo is steady,
@@ -207,7 +214,8 @@ def estimate_rhythm(
     perfectly steady part. It only picks the rough tempo and which subdivision the
     beat falls on. When the onsets fit one constant tempo, the beats come from that.
     Without that fit, the BPM is only the tracker's guess. Sparse parts often land on
-    a tempo unrelated to the song.
+    a tempo unrelated to the song. When the song's tempo is known, the grid uses exactly
+    that, so timing isn't judged against a detected tempo that's slightly off.
     """
     if is_silent(y):
         return None, np.array([]), False, False
@@ -215,16 +223,26 @@ def estimate_rhythm(
     tempo, tracked_beats = librosa.beat.beat_track(y=y, sr=sr, units="time")
     # librosa returns tempo as a one-element array, which float() rejects on current NumPy.
     tracked_bpm = float(np.atleast_1d(tempo)[0])
-    if tracked_bpm <= 0:
+    if tracked_bpm <= 0 and known_bpm is None:
         return None, tracked_beats, False, False
     while tracked_bpm > MAX_PLAUSIBLE_BPM:
         tracked_bpm /= 2
 
+    is_known = known_bpm is not None
+    near_bpm = known_bpm if is_known else tracked_bpm
+    unfitted_bpm = round(near_bpm, 1)
+
     strong = onsets[strengths >= TIMING_MIN_RELATIVE_STRENGTH * np.median(strengths)] if len(onsets) else onsets
     if len(strong) >= MIN_ONSETS_FOR_TEMPO_FIT and len(tracked_beats) > 0:
-        fit, bpm, position, subdivisions = _fit_constant_tempo(strong, tracked_bpm)
-        if fit < TEMPO_FIT_MIN_TIMES_CHANCE / np.sqrt(len(strong)):
-            return round(tracked_bpm, 1), tracked_beats, False, False
+        fit, bpm, position, subdivisions = _fit_constant_tempo(strong, near_bpm, exact=is_known)
+        chance = 1 / np.sqrt(len(strong))
+        required = (
+            KNOWN_TEMPO_FIT_MIN_TIMES_CHANCE * chance
+            if is_known
+            else min(TEMPO_FIT_MIN_TIMES_CHANCE * chance, TEMPO_FIT_CLEARLY_TIGHT)
+        )
+        if fit < required:
+            return unfitted_bpm, tracked_beats, False, is_known
         # Too much drift to judge timing against, but still a better tempo reading than the tracker's.
         if measure_grid_drift_ms(strong, bpm, subdivisions, position) > GRID_MAX_DRIFT_MS:
             return round(bpm, 1), tracked_beats, False, True
@@ -235,7 +253,7 @@ def estimate_rhythm(
         first_beat = candidates[np.median(wrapped, axis=1).argmin()] % beat
         return round(bpm, 1), np.arange(first_beat, y.size / sr, beat), True, True
 
-    return round(tracked_bpm, 1), tracked_beats, False, False
+    return unfitted_bpm, tracked_beats, False, is_known
 
 
 def find_exact_loop_period(y: np.ndarray, sr: int) -> float | None:
@@ -502,6 +520,7 @@ def analyze_audio(
     start_time: float | None = None,
     end_time: float | None = None,
     session_id: str | None = None,
+    song_bpm: float | None = None,
 ) -> AudioFeatures:
     """
     Analyze an audio file, optionally scoped to a region.
@@ -531,7 +550,7 @@ def analyze_audio(
     mono_region = librosa.to_mono(region)
 
     onsets, strengths = detect_onsets(mono_full, sr) if not is_silent(mono_full) else (np.array([]), np.array([]))
-    bpm, beat_times, tempo_is_steady, bpm_confident = estimate_rhythm(mono_full, sr, onsets, strengths)
+    bpm, beat_times, tempo_is_steady, bpm_confident = estimate_rhythm(mono_full, sr, onsets, strengths, song_bpm)
     key, key_confident = detect_key(mono_region, sr)
     # Without a steady tempo there's no reliable grid, so timing can't be judged.
     timing_issues = (

@@ -38,7 +38,7 @@ export default function App() {
 
   const { tracks, isAnalyzing: isAnalyzingSession } = useSessionAnalysis(isSession ? files : NO_FILES);
   const { trackFeatures, regionFeatures, isAnalyzingTrack, isAnalyzingRegion, error: analysisError } =
-    useAudioAnalysis(file, selectedRegion);
+    useAudioAnalysis(file, selectedRegion, parseSongBpm(songBpmText));
   const { messages, isStreaming, error: chatError, sendMessage } = useChat(SESSION_ID);
 
   const { width: chatWidth, handleProps: chatResizeProps } = useResizableWidth();
@@ -55,7 +55,7 @@ export default function App() {
     [tracks]
   );
   const isSongView = isSession && focusedIndex === null;
-  const canAsk = isSongView ? !isAnalyzingSession && sessionTracks.length > 0 : !!audioFeatures;
+  const canAsk = isSongView ? !isAnalyzingSession && sessionTracks.length > 0 : !!audioFeatures && !isAnalyzingTrack;
 
   const handleFiles = useCallback((incoming: File[]) => {
     if (incoming.length === 0) return;
