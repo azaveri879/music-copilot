@@ -562,3 +562,27 @@ def test_session_context_ranks_tracks_with_the_gap_to_the_next():
         track("Quiet", -39.6, []), track("Loudest", -19.7, []), track("Unknown", None, []), track("Second", -22.4, [])
     ))
     assert "Loudest -19.7 (2.7 dB above the next), Second -22.4 (17.2 dB above the next), Quiet -39.6\n" in ctx
+
+
+def test_analyze_uses_the_song_tempo(write_wav, click_track):
+    with open(write_wav(click_track(20)), "rb") as f:
+        content = f.read()
+    res = client.post("/analyze", files={"file": ("a.wav", content, "audio/wav")}, data={"song_bpm": "120"})
+    assert res.json()["bpm"] == 120.0
+    assert res.json()["bpm_confident"] is True
+
+
+def test_analyze_rejects_an_invalid_song_tempo(write_wav, click_track):
+    with open(write_wav(click_track(4)), "rb") as f:
+        content = f.read()
+    res = client.post("/analyze", files={"file": ("a.wav", content, "audio/wav")}, data={"song_bpm": "5"})
+    assert res.status_code == 422
+
+
+def test_timing_issues_say_which_tempo_they_were_measured_against():
+    features = AudioFeatures(
+        session_id="s", duration=4.0, sample_rate=44100, timing_checked=True,
+        timing_issues=[TimingIssue(timestamp=3.21, description="Onset ~38ms late")],
+    )
+    assert "measured against a detected tempo" in build_audio_context(features, None)
+    assert "measured against the tempo the user set" in build_audio_context(features, None, song_bpm=98.0)

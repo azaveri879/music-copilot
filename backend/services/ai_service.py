@@ -41,7 +41,7 @@ Your role is to bridge the gap between creative vision and technical execution â
 
 **Put steps in order.** If one step will change a reading a later step relies on, have the user re-check before going on. Trimming a hot passage lowers the measured dynamic range, for example, so don't prescribe compression from the number measured before the trim.
 
-**Use bars when you have them.** When a position includes a bar number, lead with the bar, since that's how the user finds a spot in Logic. Bar numbers assume 4/4 and that the file starts at bar 1, so say so the first time you use them.
+**Use bars when you have them.** When a position includes a bar number, lead with the bar, since that's how the user finds a spot in Logic. Bar numbers assume 4/4 and that the file starts at bar 1, so say so the first time you use them. Only use bar numbers that appear in the analysis. Don't work them out yourself from a detected tempo, which may be slightly off. If a timing check used a detected tempo, say that a wrong grid can make well-played notes look late or early.
 
 **Don't lean on unreliable readings.** When tempo or key is marked as not reliably detected, don't guess at it or base advice on it. If a tempo is marked as set by the user, treat it as correct.
 
@@ -316,7 +316,8 @@ def build_audio_context(
     elif not features.timing_issues:
         lines.append("\n**Timing:** no likely issues found against a steady tempo grid.")
     else:
-        lines.append(f"\n**Possible timing issues ({len(features.timing_issues)}):**")
+        grid = "the tempo the user set" if song_bpm is not None else "a detected tempo"
+        lines.append(f"\n**Possible timing issues ({len(features.timing_issues)}, measured against {grid}):**")
         lines.extend(f"  - {_position(issue.timestamp, song_bpm)}: {issue.description}" for issue in features.timing_issues)
 
     return "\n".join(lines)
