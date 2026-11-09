@@ -14,6 +14,18 @@ export interface FrequencyProfile {
   high_energy: number;
 }
 
+export interface BandLevel {
+  name: string;
+  low_hz: number;
+  high_hz: number;
+  level_db: number;
+}
+
+export interface PeakMoment {
+  timestamp: number;
+  level_dbfs: number;
+}
+
 export interface AudioFeatures {
   session_id: string;
   duration: number;
@@ -30,6 +42,9 @@ export interface AudioFeatures {
   timing_checked: boolean;
   timing_issues: TimingIssue[];
   frequency_profile: FrequencyProfile | null;
+  band_levels: BandLevel[];
+  prominent_frequencies_hz: number[];
+  peak_moments: PeakMoment[];
 }
 
 export interface GainEdit {

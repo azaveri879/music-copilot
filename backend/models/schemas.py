@@ -19,6 +19,18 @@ class FrequencyProfile(BaseModel):
     high_energy: float
 
 
+class BandLevel(BaseModel):
+    name: str
+    low_hz: float
+    high_hz: float
+    level_db: float  # relative to the loudest band
+
+
+class PeakMoment(BaseModel):
+    timestamp: float  # seconds into the file
+    level_dbfs: float
+
+
 class AudioFeatures(BaseModel):
     session_id: str
     duration: float
@@ -35,6 +47,9 @@ class AudioFeatures(BaseModel):
     timing_checked: bool = False  # False when the tempo isn't steady enough to judge timing against
     timing_issues: list[TimingIssue] = []
     frequency_profile: Optional[FrequencyProfile] = None
+    band_levels: list[BandLevel] = []
+    prominent_frequencies_hz: list[float] = []
+    peak_moments: list[PeakMoment] = []
 
 
 class GainEdit(BaseModel):

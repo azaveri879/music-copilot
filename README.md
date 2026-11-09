@@ -352,9 +352,18 @@ With a region, `bpm` and the beat grid come from the whole track. `timing_issues
     "low_energy": 0.42,
     "mid_energy": 0.35,
     "high_energy": 0.23
-  }
+  },
+  "band_levels": [
+    { "name": "sub", "low_hz": 20, "high_hz": 60, "level_db": -31.4 }
+  ],
+  "prominent_frequencies_hz": [158, 188, 305, 621],
+  "peak_moments": [
+    { "timestamp": 125.31, "level_dbfs": -0.1 }
+  ]
 }
 ```
+
+`band_levels` covers six bands from 20 Hz to 20 kHz, in dB relative to the loudest band. `prominent_frequencies_hz` lists where energy stands out between 80 Hz and 1 kHz, which may just be the notes played. `peak_moments` lists up to five moments within 6 dB of the loudest one, as positions in the file. These all describe the selected region when there is one.
 
 ---
 

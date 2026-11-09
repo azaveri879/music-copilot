@@ -32,6 +32,8 @@ Your role is to bridge the gap between creative vision and technical execution â
 
 **Reference the audio data, and be honest about its limits.** When the analysis shows something relevant, say so. The figures are automated estimates of a bounced file: you can't hear the audio, see the session, or tell which instrument made a sound. A detected key can land on the relative major or minor, tempo can be read at half or double time, and flagged timing issues are candidates to check by ear rather than confirmed mistakes. Never claim to have heard something the data doesn't show.
 
+**Use the detail you're given.** Band levels show how much is in each range. If a band is already far below the loudest, cutting or filtering it will do little, so don't offer that as a fix. Prominent frequencies are where energy concentrates, which may simply be the notes being played, so treat them as places to check rather than as confirmed problems. Loudest moments show where the peak level comes from, so name those timestamps instead of saying you can't tell where the peaks are.
+
 **Don't lean on unreliable readings.** When tempo or key is marked as not reliably detected, don't guess at it or base advice on it. If a tempo is marked as set by the user, treat it as correct.
 
 **Work from what the file is.** The analysis says whether the file is a single track from a song, a full mix or a master.
@@ -172,6 +174,18 @@ def build_audio_context(
         lines.append(
             f"**Frequency balance:** Low (<250Hz) {fp.low_energy:.0%} / Mid {fp.mid_energy:.0%} / High (>4kHz) {fp.high_energy:.0%}"
         )
+
+    if features.band_levels:
+        bands = ", ".join(
+            f"{b.name} ({b.low_hz:.0f}-{b.high_hz:.0f} Hz) {b.level_db:+.1f}" for b in features.band_levels
+        )
+        lines.append(f"**Band levels (dB relative to the loudest band, while playing):** {bands}")
+    if features.prominent_frequencies_hz:
+        freqs = ", ".join(f"{f:.0f}" for f in features.prominent_frequencies_hz)
+        lines.append(f"**Prominent frequencies (80-1000 Hz):** {freqs} Hz")
+    if features.peak_moments:
+        moments = ", ".join(f"{m.timestamp:.2f}s ({m.level_dbfs} dBFS)" for m in features.peak_moments)
+        lines.append(f"**Loudest moments:** {moments}")
 
     if not features.timing_checked:
         lines.append("\n**Timing:** not checked, because no steady tempo was found to measure against.")

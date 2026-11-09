@@ -284,3 +284,67 @@ def test_reports_fitted_tempo_when_only_part_of_the_track_is_on_the_grid(write_w
     features = analyze_audio(write_wav(y))
     assert features.timing_checked is False
     assert features.bpm == pytest.approx(98.0, abs=0.2)
+
+
+def band(features, name):
+    return next(b for b in features.band_levels if b.name == name)
+
+
+def test_band_levels_show_an_empty_low_end(write_wav):
+    features = analyze_audio(write_wav(tone(800, 4.0)))
+    assert band(features, "mid").level_db == 0
+    assert band(features, "sub").level_db < -40
+    assert band(features, "bass").level_db < -40
+
+
+def test_band_levels_find_real_sub_energy(write_wav):
+    features = analyze_audio(write_wav(tone(45, 4.0) + tone(800, 4.0, 0.05)))
+    assert band(features, "sub").level_db == 0
+    assert band(features, "mid").level_db == pytest.approx(-20, abs=3)
+
+
+def test_band_levels_ignore_the_gaps_between_phrases(write_wav):
+    rumble = 0.0005 * tone(45, 8.0, 1.0)
+    y = np.concatenate([tone(800, 2.0), rumble, tone(800, 2.0)])
+    assert band(analyze_audio(write_wav(y)), "sub").level_db < -40
+
+
+def test_prominent_frequencies_find_tones(write_wav):
+    y = tone(200, 4.0, 0.3) + tone(600, 4.0, 0.3)
+    assert analyze_audio(write_wav(y)).prominent_frequencies_hz == pytest.approx([200, 600], abs=8)
+
+
+def test_noise_has_no_prominent_frequencies(write_wav):
+    y = 0.2 * np.random.default_rng(3).standard_normal(20 * SR)
+    assert analyze_audio(write_wav(y)).prominent_frequencies_hz == []
+
+
+def test_peak_moments_locate_spikes_in_time_order(write_wav):
+    y = tone(440, 8.0, 0.05)
+    y[3 * SR] = 0.9
+    y[6 * SR] = 0.8
+    moments = analyze_audio(write_wav(y)).peak_moments
+    assert [m.timestamp for m in moments] == pytest.approx([3.0, 6.0], abs=0.02)
+    assert moments[0].level_dbfs == pytest.approx(-0.9, abs=0.2)
+    assert str(moments[0].level_dbfs) == str(round(moments[0].level_dbfs, 1))
+    assert len(str(moments[0].level_dbfs)) <= 5
+
+
+def test_peak_moments_are_positions_in_the_file_for_a_region(write_wav):
+    y = tone(440, 8.0, 0.05)
+    y[5 * SR] = 0.9
+    moments = analyze_audio(write_wav(y), start_time=4.0, end_time=7.0).peak_moments
+    assert moments[0].timestamp == pytest.approx(5.0, abs=0.02)
+
+
+def test_peak_moments_find_a_peak_at_the_edge_of_the_file(write_wav):
+    y = tone(440, 4.0, 0.05)
+    y[10] = 0.9
+    assert analyze_audio(write_wav(y)).peak_moments[0].timestamp == pytest.approx(0.0, abs=0.02)
+
+
+def test_silence_has_no_spectrum_detail_or_peaks(write_wav):
+    features = analyze_audio(write_wav(np.zeros(4 * SR)))
+    assert features.band_levels == []
+    assert features.prominent_frequencies_hz == []
+    assert features.peak_moments == []

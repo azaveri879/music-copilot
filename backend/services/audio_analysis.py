@@ -6,9 +6,9 @@ import librosa
 import numpy as np
 import pyloudnorm
 import soundfile as sf
-from scipy.signal import medfilt
+from scipy.signal import find_peaks, medfilt
 
-from models.schemas import AudioFeatures, FrequencyProfile, TimingIssue
+from models.schemas import AudioFeatures, BandLevel, FrequencyProfile, PeakMoment, TimingIssue
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,27 @@ SILENCE_RMS = 1e-5
 ACTIVE_LEVEL_GATE_DB = 40.0
 # Below this correlation with the best-matching key profile, the audio doesn't clearly suggest a key.
 KEY_MIN_CORRELATION = 0.6
+
+SPECTRUM_BANDS = [
+    ("sub", 20.0, 60.0),
+    ("bass", 60.0, 120.0),
+    ("low-mid", 120.0, 350.0),
+    ("mid", 350.0, 1500.0),
+    ("presence", 1500.0, 5000.0),
+    ("air", 5000.0, 20000.0),
+]
+SPECTRUM_N_FFT = 8192  # fine enough to separate neighboring low frequencies
+SPECTRUM_HOP = 2048
+PROMINENT_RANGE_HZ = (80.0, 1000.0)
+PROMINENT_SMOOTHING_BINS = 5
+PROMINENT_MIN_SPACING_HZ = 25.0
+PROMINENT_MIN_RISE_DB = 3.0  # above its surroundings, so a smooth spectrum reports nothing
+MAX_PROMINENT_FREQUENCIES = 4
+
+PEAK_BLOCK = 256
+PEAK_MIN_SPACING_S = 0.5
+PEAK_WITHIN_DB = 6.0  # only moments close to the loudest one explain the peak level
+MAX_PEAK_MOMENTS = 5
 
 # Positions within a beat that count as "on the grid": straight 16ths plus
 # triplets, so swung or triplet parts aren't reported as mistimed.
@@ -377,6 +398,77 @@ def compute_frequency_profile(y: np.ndarray, sr: int) -> FrequencyProfile | None
     )
 
 
+def compute_spectrum_detail(y: np.ndarray, sr: int) -> tuple[list[BandLevel], list[float]]:
+    """
+    Level of each band relative to the loudest one, and the frequencies that stand out.
+
+    Uses power, while the part is playing. These show whether there's anything in a
+    range to cut, and where in the low-mids energy concentrates.
+    """
+    if is_silent(y):
+        return [], []
+
+    power = np.abs(librosa.stft(y, n_fft=SPECTRUM_N_FFT, hop_length=SPECTRUM_HOP)) ** 2
+    active = _within_active_gate(10 * np.log10(np.maximum(power.sum(axis=0), 1e-20)))
+    spectrum = power[:, active].sum(axis=1)
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=SPECTRUM_N_FFT)
+
+    bands = [(name, low, high, spectrum[(freqs >= low) & (freqs < high)]) for name, low, high in SPECTRUM_BANDS]
+    bands = [(name, low, high, float(bins.sum())) for name, low, high, bins in bands if bins.size]
+    loudest = max(energy for *_, energy in bands)
+    if loudest <= 0:
+        return [], []
+    levels = [
+        BandLevel(
+            name=name, low_hz=low, high_hz=high, level_db=round(10 * np.log10(max(energy / loudest, 1e-12)), 1)
+        )
+        for name, low, high, energy in bands
+    ]
+
+    in_range = (freqs >= PROMINENT_RANGE_HZ[0]) & (freqs <= PROMINENT_RANGE_HZ[1])
+    kernel = np.ones(PROMINENT_SMOOTHING_BINS) / PROMINENT_SMOOTHING_BINS
+    smoothed = 10 * np.log10(np.maximum(np.convolve(spectrum, kernel, "same")[in_range], 1e-20))
+    bin_hz = sr / SPECTRUM_N_FFT
+    peaks, _ = find_peaks(
+        smoothed, distance=max(1, round(PROMINENT_MIN_SPACING_HZ / bin_hz)), prominence=PROMINENT_MIN_RISE_DB
+    )
+    strongest = peaks[np.argsort(smoothed[peaks])[::-1][:MAX_PROMINENT_FREQUENCIES]]
+    return levels, sorted(round(float(f)) for f in freqs[in_range][strongest])
+
+
+def find_peak_moments(y: np.ndarray, sr: int, start: float = 0.0) -> list[PeakMoment]:
+    """
+    The moments that set the peak level, in time order, as positions in the file.
+
+    `y` is (samples,) or (channels, samples), and `start` is where it begins in the file.
+    """
+    if is_silent(y):
+        return []
+
+    envelope = np.abs(np.atleast_2d(y)).max(axis=0)
+    blocks = envelope.size // PEAK_BLOCK
+    if blocks == 0:
+        return []
+    levels = envelope[: blocks * PEAK_BLOCK].reshape(blocks, PEAK_BLOCK).max(axis=1)
+    if levels.max() <= 0:
+        return []
+
+    # Padding lets a peak in the very first or last block be found.
+    distance = max(1, round(PEAK_MIN_SPACING_S * sr / PEAK_BLOCK))
+    peaks, _ = find_peaks(np.concatenate([[0.0], levels, [0.0]]), distance=distance)
+    peaks = peaks - 1
+    threshold = levels.max() * 10 ** (-PEAK_WITHIN_DB / 20)
+    peaks = peaks[levels[peaks] >= threshold]
+    strongest = peaks[np.argsort(levels[peaks])[::-1][:MAX_PEAK_MOMENTS]]
+    return [
+        PeakMoment(
+            timestamp=round(start + int(i) * PEAK_BLOCK / sr, 2),
+            level_dbfs=round(20 * np.log10(float(levels[i])), 1),  # audio is float32, which won't round cleanly
+        )
+        for i in sorted(strongest)
+    ]
+
+
 def analyze_audio(
     audio_path: str,
     start_time: float | None = None,
@@ -425,6 +517,8 @@ def analyze_audio(
         centroid = round(float(librosa.feature.spectral_centroid(y=mono_region, sr=sr).mean()), 1)
         onset_strength = round(float(librosa.onset.onset_strength(y=mono_region, sr=sr).mean()), 4)
 
+    band_levels, prominent_frequencies = compute_spectrum_detail(mono_region, sr)
+
     return AudioFeatures(
         session_id=session_id or str(uuid.uuid4()),
         duration=round(mono_region.size / sr, 2),
@@ -441,4 +535,7 @@ def analyze_audio(
         timing_checked=tempo_is_steady,
         timing_issues=timing_issues,
         frequency_profile=compute_frequency_profile(mono_region, sr),
+        band_levels=band_levels,
+        prominent_frequencies_hz=prominent_frequencies,
+        peak_moments=find_peak_moments(region, sr, start),
     )

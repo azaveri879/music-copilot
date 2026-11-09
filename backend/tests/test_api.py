@@ -434,3 +434,16 @@ def test_edit_rejects_a_nudge_with_no_note():
 
 def test_chat_rejects_empty_message():
     assert client.post("/chat", json={"session_id": "s", "message": ""}).status_code == 422
+
+
+def test_audio_context_includes_spectrum_detail_and_peak_moments():
+    features = AudioFeatures(
+        session_id="s", duration=4.0, sample_rate=44100,
+        band_levels=[{"name": "sub", "low_hz": 20, "high_hz": 60, "level_db": -31.4}],
+        prominent_frequencies_hz=[158, 621],
+        peak_moments=[{"timestamp": 125.31, "level_dbfs": -0.1}],
+    )
+    ctx = build_audio_context(features, None)
+    assert "sub (20-60 Hz) -31.4" in ctx
+    assert "158, 621 Hz" in ctx
+    assert "125.31s (-0.1 dBFS)" in ctx
