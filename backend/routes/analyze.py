@@ -107,6 +107,7 @@ async def analyze_endpoint(
     file: UploadFile = File(...),
     start_time: float | None = Form(None),
     end_time: float | None = Form(None),
+    remember: bool = Form(True),  # False keeps a bulk analysis from evicting the track being worked on
 ):
     content, suffix = await read_upload(file)
 
@@ -124,7 +125,8 @@ async def analyze_endpoint(
             end_time=end_time,
             session_id=session_id,
         )
-        audio_store.remember(session_id, content)
+        if remember:
+            audio_store.remember(session_id, content)
         return features
     except (AudioDecodeError, InvalidRegionError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

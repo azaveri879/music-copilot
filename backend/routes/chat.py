@@ -25,6 +25,10 @@ async def chat_endpoint(request: ChatRequest):
                 audio_features=request.audio_features,
                 region=request.region,
                 history=request.history,
+                file_type=request.file_type,
+                song_bpm=request.song_bpm,
+                session_tracks=request.session_tracks,
+                focused_track=request.focused_track,
             ):
                 if isinstance(chunk, EditProposal):
                     yield sse({"type": "proposal", "proposal": chunk.model_dump()})

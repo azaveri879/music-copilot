@@ -78,7 +78,43 @@ def test_short_region_still_reports_track_tempo(write_wav, click_track):
 )
 def test_detects_key(write_wav, chords, expected):
     y = np.concatenate([chord(c, 2.0) for c in chords] * 2)
-    assert analyze_audio(write_wav(y)).key == expected
+    features = analyze_audio(write_wav(y))
+    assert features.key == expected
+    assert features.key_confident
+
+
+def noise_floor(seconds: float) -> np.ndarray:
+    return 1e-4 * np.random.default_rng(0).standard_normal(int(seconds * SR))
+
+
+def test_key_ignores_the_gaps_between_phrases(write_wav):
+    phrases = [chord(c, 2.0) for c in [[261.63, 329.63, 392.0], [349.23, 440.0, 523.25], [392.0, 493.88, 587.33]]]
+    y = np.concatenate([part for phrase in phrases for part in (phrase, noise_floor(8.0))])
+    features = analyze_audio(write_wav(y))
+    assert features.key == "C major"
+    assert features.key_confident
+
+
+def test_noise_has_no_confident_key(write_wav):
+    y = 0.2 * np.random.default_rng(1).standard_normal(8 * SR)
+    assert not analyze_audio(write_wav(y)).key_confident
+
+
+def test_steady_part_has_a_confident_tempo(write_wav, click_track):
+    assert analyze_audio(write_wav(click_track())).bpm_confident
+
+
+def test_scattered_notes_have_no_confident_tempo(write_wav):
+    y = np.zeros(30 * SR)
+    for time in np.sort(np.random.default_rng(2).uniform(0.5, 29.0, 40)):
+        click(y, float(time))
+    assert not analyze_audio(write_wav(y)).bpm_confident
+
+
+def test_silent_file_has_no_confident_readings(write_wav):
+    features = analyze_audio(write_wav(np.zeros(4 * SR)))
+    assert not features.bpm_confident
+    assert not features.key_confident
 
 
 def test_region_key_describes_the_region_not_the_track(write_wav):
@@ -106,6 +142,11 @@ def test_dynamic_range_separates_steady_from_dynamic_audio(write_wav):
     ).dynamic_range_db
     assert steady < 1
     assert dynamic == pytest.approx(20, abs=2)
+
+
+def test_dynamic_range_ignores_the_gaps_between_phrases(write_wav):
+    y = np.concatenate([tone(440, 2.0, 0.5), noise_floor(2.0)] * 3)
+    assert analyze_audio(write_wav(y)).dynamic_range_db < 3
 
 
 def test_frequency_profile_follows_the_content(write_wav):
@@ -243,3 +284,86 @@ def test_reports_fitted_tempo_when_only_part_of_the_track_is_on_the_grid(write_w
     features = analyze_audio(write_wav(y))
     assert features.timing_checked is False
     assert features.bpm == pytest.approx(98.0, abs=0.2)
+
+
+def band(features, name):
+    return next(b for b in features.band_levels if b.name == name)
+
+
+def test_band_levels_show_an_empty_low_end(write_wav):
+    features = analyze_audio(write_wav(tone(800, 4.0)))
+    assert band(features, "mid").level_db == 0
+    assert band(features, "sub").level_db < -40
+    assert band(features, "bass").level_db < -40
+
+
+def test_band_levels_find_real_sub_energy(write_wav):
+    features = analyze_audio(write_wav(tone(45, 4.0) + tone(800, 4.0, 0.05)))
+    assert band(features, "sub").level_db == 0
+    assert band(features, "mid").level_db == pytest.approx(-20, abs=3)
+
+
+def test_band_levels_ignore_the_gaps_between_phrases(write_wav):
+    rumble = 0.0005 * tone(45, 8.0, 1.0)
+    y = np.concatenate([tone(800, 2.0), rumble, tone(800, 2.0)])
+    assert band(analyze_audio(write_wav(y)), "sub").level_db < -40
+
+
+def test_prominent_frequencies_find_tones(write_wav):
+    y = tone(200, 4.0, 0.3) + tone(600, 4.0, 0.3)
+    assert analyze_audio(write_wav(y)).prominent_frequencies_hz == pytest.approx([200, 600], abs=8)
+
+
+def test_noise_has_no_prominent_frequencies(write_wav):
+    y = 0.2 * np.random.default_rng(3).standard_normal(20 * SR)
+    assert analyze_audio(write_wav(y)).prominent_frequencies_hz == []
+
+
+def test_peak_moments_locate_spikes_in_time_order(write_wav):
+    y = tone(440, 8.0, 0.05)
+    y[3 * SR] = 0.9
+    y[6 * SR] = 0.8
+    moments = analyze_audio(write_wav(y)).peak_moments
+    assert [m.timestamp for m in moments] == pytest.approx([3.0, 6.0], abs=0.02)
+    assert moments[0].level_dbfs == pytest.approx(-0.9, abs=0.2)
+    assert str(moments[0].level_dbfs) == str(round(moments[0].level_dbfs, 1))
+    assert len(str(moments[0].level_dbfs)) <= 5
+
+
+def test_peak_moments_are_positions_in_the_file_for_a_region(write_wav):
+    y = tone(440, 8.0, 0.05)
+    y[5 * SR] = 0.9
+    moments = analyze_audio(write_wav(y), start_time=4.0, end_time=7.0).peak_moments
+    assert moments[0].timestamp == pytest.approx(5.0, abs=0.02)
+
+
+def test_peak_moments_find_a_peak_at_the_edge_of_the_file(write_wav):
+    y = tone(440, 4.0, 0.05)
+    y[10] = 0.9
+    assert analyze_audio(write_wav(y)).peak_moments[0].timestamp == pytest.approx(0.0, abs=0.02)
+
+
+def test_silence_has_no_spectrum_detail_or_peaks(write_wav):
+    features = analyze_audio(write_wav(np.zeros(4 * SR)))
+    assert features.band_levels == []
+    assert features.prominent_frequencies_hz == []
+    assert features.peak_moments == []
+
+
+def test_active_ranges_find_when_the_part_plays(write_wav):
+    y = np.concatenate([np.zeros(2 * SR), tone(440, 3.0), np.zeros(4 * SR), tone(440, 2.0)])
+    ranges = analyze_audio(write_wav(y)).active_ranges
+    assert [(r.start, r.end) for r in ranges] == [
+        pytest.approx((2.0, 5.0), abs=0.1), pytest.approx((9.0, 11.0), abs=0.1)
+    ]
+
+
+def test_active_ranges_merge_short_pauses(write_wav):
+    y = np.concatenate([tone(440, 2.0), np.zeros(SR // 2), tone(440, 2.0)])
+    assert len(analyze_audio(write_wav(y)).active_ranges) == 1
+
+
+def test_active_ranges_are_positions_in_the_file_for_a_region(write_wav):
+    y = np.concatenate([np.zeros(2 * SR), tone(440, 6.0)])
+    ranges = analyze_audio(write_wav(y), start_time=1.0, end_time=5.0).active_ranges
+    assert (ranges[0].start, ranges[0].end) == (pytest.approx(2.0, abs=0.1), pytest.approx(5.0, abs=0.1))

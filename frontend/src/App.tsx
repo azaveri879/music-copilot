@@ -1,22 +1,42 @@
-import { CSSProperties, useCallback, useState } from "react";
+import { CSSProperties, useCallback, useMemo, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { ChatPanel } from "./components/ChatPanel";
 import { EditResultPanel } from "./components/EditResultPanel";
+import { SongTempoInput } from "./components/SongTempoInput";
+import { TrackTable } from "./components/TrackTable";
 import { WaveformPlayer } from "./components/WaveformPlayer";
 import { useAudioAnalysis } from "./hooks/useAudioAnalysis";
 import { useAudioEdit } from "./hooks/useAudioEdit";
 import { useChat } from "./hooks/useChat";
 import { useResizableWidth } from "./hooks/useResizableWidth";
-import { AudioRegion } from "./types";
+import { useSessionAnalysis } from "./hooks/useSessionAnalysis";
+import { AudioRegion, FileType } from "./types";
+import { compareByName, filesFromDrop, filesFromFolderPicker, isSupportedAudio, trackName } from "./utils/files";
 import { formatTime } from "./utils/format";
+import { parseSongBpm } from "./utils/tempo";
 
 const SESSION_ID = uuidv4();
+const NO_FILES: File[] = [];
+const MAX_TRACKS = 40;
+
+const FILE_TYPES: { value: FileType; label: string }[] = [
+  { value: "track", label: "Single track" },
+  { value: "mix", label: "Full mix" },
+  { value: "master", label: "Master" },
+];
 
 export default function App() {
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>(NO_FILES);
+  const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
   const [selectedRegion, setSelectedRegion] = useState<AudioRegion | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [fileType, setFileType] = useState<FileType | null>(null);
+  const [songBpmText, setSongBpmText] = useState(""); // kept across files, since they're often from one song
 
+  const isSession = files.length > 1;
+  const file = isSession ? (focusedIndex !== null ? files[focusedIndex] : null) : files[0] ?? null;
+
+  const { tracks, isAnalyzing: isAnalyzingSession } = useSessionAnalysis(isSession ? files : NO_FILES);
   const { trackFeatures, regionFeatures, isAnalyzingTrack, isAnalyzingRegion, error: analysisError } =
     useAudioAnalysis(file, selectedRegion);
   const { messages, isStreaming, error: chatError, sendMessage } = useChat(SESSION_ID);
@@ -26,21 +46,68 @@ export default function App() {
   const audioFeatures = regionFeatures ?? trackFeatures;
   const edit = useAudioEdit(file, trackFeatures);
 
-  const handleFile = useCallback((f: File | undefined) => {
-    if (!f) return;
-    if (!isSupportedAudio(f)) {
-      setFileError(`${f.name} isn't a supported format. Use WAV, MP3, AIFF or FLAC.`);
+  const songBpm = parseSongBpm(songBpmText);
+  const detectedBpm = audioFeatures?.bpm_confident ? audioFeatures.bpm : null;
+  const musicalKey = audioFeatures?.key_confident ? audioFeatures.key : null;
+
+  const sessionTracks = useMemo(
+    () => tracks.flatMap((t) => (t.features ? [{ name: trackName(t.file), features: t.features }] : [])),
+    [tracks]
+  );
+  const isSongView = isSession && focusedIndex === null;
+  const canAsk = isSongView ? !isAnalyzingSession && sessionTracks.length > 0 : !!audioFeatures;
+
+  const handleFiles = useCallback((incoming: File[]) => {
+    if (incoming.length === 0) return;
+    const supported = incoming.filter(isSupportedAudio).sort(compareByName);
+    if (supported.length === 0) {
+      setFileError(
+        incoming.length === 1
+          ? `${incoming[0].name} isn't a supported format. Use WAV, MP3, AIFF or FLAC.`
+          : "None of those are supported audio files. Use WAV, MP3, AIFF or FLAC."
+      );
       return;
     }
-    setFileError(null);
-    setFile(f);
+
+    const skipped = incoming.length - supported.length;
+    const overLimit = supported.length - MAX_TRACKS;
+    setFileError(
+      overLimit > 0
+        ? `Only the first ${MAX_TRACKS} tracks were loaded.`
+        : skipped > 0
+          ? `Skipped ${skipped} ${skipped === 1 ? "file" : "files"} that aren't supported audio.`
+          : null
+    );
+    setFiles(supported.slice(0, MAX_TRACKS));
+    setFocusedIndex(null);
+    setFileType(null);
+    setSelectedRegion(null);
+  }, []);
+
+  const handleDrop = useCallback(
+    (data: DataTransfer) => {
+      filesFromDrop(data)
+        .then(handleFiles)
+        .catch(() => setFileError("Couldn't read those files. Try choosing them with the file picker."));
+    },
+    [handleFiles]
+  );
+
+  const handleFocus = useCallback((index: number | null) => {
+    setFocusedIndex(index);
     setSelectedRegion(null);
   }, []);
 
   const handleSend = useCallback(
     // If region analysis failed, the answer is about the full track, so don't label it as the region.
-    (text: string) => sendMessage(text, audioFeatures, regionFeatures ? selectedRegion : null, file),
-    [sendMessage, audioFeatures, regionFeatures, selectedRegion, file]
+    (text: string) =>
+      sendMessage(text, audioFeatures, regionFeatures ? selectedRegion : null, file, {
+        fileType: isSession ? "track" : fileType,
+        songBpm,
+        sessionTracks: isSession ? sessionTracks : [],
+        focusedTrack: isSession && file ? trackName(file) : null,
+      }),
+    [sendMessage, audioFeatures, regionFeatures, selectedRegion, file, isSession, fileType, songBpm, sessionTracks]
   );
 
   const error = fileError ?? analysisError;
@@ -61,38 +128,100 @@ export default function App() {
           <div
             onDrop={(e) => {
               e.preventDefault();
-              handleFile(e.dataTransfer.files[0]);
+              handleDrop(e.dataTransfer);
             }}
             onDragOver={(e) => e.preventDefault()}
             className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors cursor-pointer ${
-              file ? "border-gray-700 bg-gray-900/50" : "border-gray-700 hover:border-indigo-500 bg-gray-900/30"
+              files.length > 0 ? "border-gray-700 bg-gray-900/50" : "border-gray-700 hover:border-indigo-500 bg-gray-900/30"
             }`}
             onClick={() => document.getElementById("file-input")?.click()}
           >
             <input
               id="file-input"
               type="file"
+              multiple
               accept=".wav,.mp3,.aif,.aiff,.flac"
               className="hidden"
               onClick={(e) => e.stopPropagation()}
               onChange={(e) => {
-                handleFile(e.target.files?.[0]);
+                handleFiles(Array.from(e.target.files ?? []));
                 e.target.value = ""; // so choosing the same file again still fires
               }}
             />
-            {file ? (
+            <input
+              id="folder-input"
+              type="file"
+              className="hidden"
+              ref={(el) => el?.setAttribute("webkitdirectory", "")}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                if (e.target.files) handleFiles(filesFromFolderPicker(e.target.files));
+                e.target.value = "";
+              }}
+            />
+            {files.length > 0 ? (
               <div className="space-y-1">
-                <p className="text-sm font-medium text-gray-300 break-all">{file.name}</p>
-                <p className="text-xs text-gray-500">Click to replace · {(file.size / 1024 / 1024).toFixed(1)} MB</p>
+                <p className="text-sm font-medium text-gray-300 break-all">
+                  {isSession ? `${files.length} tracks` : files[0].name}
+                </p>
+                <p className="text-xs text-gray-500">
+                  Click to replace
+                  {!isSession && ` · ${(files[0].size / 1024 / 1024).toFixed(1)} MB`}
+                </p>
               </div>
             ) : (
               <div className="space-y-2">
                 <p className="text-3xl">🎵</p>
-                <p className="text-sm text-gray-400">Drop an audio file here, or click to browse</p>
-                <p className="text-xs text-gray-500">WAV, MP3, AIFF, FLAC supported</p>
+                <p className="text-sm text-gray-400">Drop a track, several tracks or a folder here, or click to browse</p>
+                <p className="text-xs text-gray-500">
+                  WAV, MP3, AIFF, FLAC supported ·{" "}
+                  <button
+                    type="button"
+                    className="underline hover:text-gray-300"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      document.getElementById("folder-input")?.click();
+                    }}
+                  >
+                    choose a folder
+                  </button>
+                </p>
               </div>
             )}
           </div>
+
+          {/* All the tracks in the song */}
+          {isSession && (
+            <TrackTable
+              tracks={tracks}
+              focusedIndex={focusedIndex}
+              onFocus={handleFocus}
+              songBpmText={songBpmText}
+              onSongBpmChange={setSongBpmText}
+            />
+          )}
+
+          {/* What the file is, which analysis can't tell */}
+          {file && !isSession && (
+            <div role="group" aria-label="What is this file?" className="flex flex-wrap items-center gap-2 px-1">
+              <span className="text-xs text-gray-400">What is this?</span>
+              {FILE_TYPES.map(({ value, label }) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={fileType === value}
+                  onClick={() => setFileType(value)}
+                  className={`text-xs px-3 py-1 rounded-full border transition-colors ${
+                    fileType === value
+                      ? "bg-indigo-600 border-indigo-600 text-white"
+                      : "border-gray-700 text-gray-300 hover:border-indigo-500"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* Analysis status */}
           {isAnalyzingTrack && <div className="text-xs text-indigo-400 animate-pulse px-1">Analyzing audio…</div>}
@@ -104,12 +233,25 @@ export default function App() {
               <p className="text-xs text-gray-500 px-1">
                 {regionFeatures && selectedRegion
                   ? `Selection ${formatTime(selectedRegion.start)} – ${formatTime(selectedRegion.end)}`
-                  : "Full track"}
+                  : isSession && file
+                    ? trackName(file)
+                    : "Full track"}
               </p>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-gray-900 rounded-lg px-3 py-2">
+                  <label htmlFor="song-bpm" className="block text-xs text-gray-500">
+                    BPM
+                  </label>
+                  <SongTempoInput
+                    id="song-bpm"
+                    value={songBpmText}
+                    detectedBpm={detectedBpm}
+                    onChange={setSongBpmText}
+                    className="w-full"
+                  />
+                </div>
                 {[
-                  { label: "BPM", value: audioFeatures.bpm !== null ? Math.round(audioFeatures.bpm) : "—" },
-                  { label: "Key", value: audioFeatures.key ?? "—" },
+                  { label: "Key", value: audioFeatures.key === null ? "—" : musicalKey ?? "Unclear" },
                   {
                     label: "Loudness",
                     value: audioFeatures.loudness_lufs !== null ? `${audioFeatures.loudness_lufs.toFixed(1)} LUFS` : "—",
@@ -179,7 +321,10 @@ export default function App() {
             messages={messages}
             isStreaming={isStreaming}
             error={chatError}
-            audioFeatures={audioFeatures}
+            canAsk={canAsk}
+            isSongView={isSongView}
+            tempo={songBpm ?? detectedBpm}
+            musicalKey={musicalKey}
             selectedRegion={selectedRegion}
             isAnalyzingRegion={isAnalyzingRegion}
             onClearRegion={() => setSelectedRegion(null)}
@@ -196,8 +341,4 @@ export default function App() {
       </div>
     </div>
   );
-}
-
-function isSupportedAudio(f: File) {
-  return /\.(wav|mp3|aiff?|flac)$/i.test(f.name);
 }

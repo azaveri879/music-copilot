@@ -71,8 +71,12 @@ export function WaveformPlayer({ file, editedAudio, region, onRegionChange }: Wa
   }, [onRegionChange]);
 
   useEffect(() => {
-    if (!wavesurferRef.current || !file) return;
+    if (!wavesurferRef.current) return;
     const ws = wavesurferRef.current;
+    if (!file) {
+      ws.pause(); // the player is hidden now, so nothing else could stop it
+      return;
+    }
     const isSameFile = loadedFileRef.current === file;
     loadedFileRef.current = file;
     const resumeAt = isSameFile ? ws.getCurrentTime() : 0;

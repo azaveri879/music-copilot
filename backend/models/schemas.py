@@ -19,12 +19,26 @@ class FrequencyProfile(BaseModel):
     high_energy: float
 
 
+class BandLevel(BaseModel):
+    name: str
+    low_hz: float
+    high_hz: float
+    level_db: float  # relative to the loudest band
+
+
+class PeakMoment(BaseModel):
+    timestamp: float  # seconds into the file
+    level_dbfs: float
+
+
 class AudioFeatures(BaseModel):
     session_id: str
     duration: float
     sample_rate: int
     bpm: Optional[float] = None
+    bpm_confident: bool = False  # False when bpm is only the beat tracker's guess
     key: Optional[str] = None
+    key_confident: bool = False  # False when the audio doesn't clearly suggest a key
     loudness_lufs: Optional[float] = None
     peak_dbfs: Optional[float] = None
     dynamic_range_db: Optional[float] = None
@@ -33,6 +47,10 @@ class AudioFeatures(BaseModel):
     timing_checked: bool = False  # False when the tempo isn't steady enough to judge timing against
     timing_issues: list[TimingIssue] = []
     frequency_profile: Optional[FrequencyProfile] = None
+    band_levels: list[BandLevel] = []
+    prominent_frequencies_hz: list[float] = []
+    peak_moments: list[PeakMoment] = []
+    active_ranges: list[AudioRegion] = []  # when the part is playing, as positions in the file
 
 
 class GainEdit(BaseModel):
@@ -89,9 +107,23 @@ class ChatHistoryItem(BaseModel):
     content: str
 
 
+FileType = Literal["track", "mix", "master"]
+
+MAX_SESSION_TRACKS = 40
+
+
+class TrackSummary(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    features: AudioFeatures
+
+
 class ChatRequest(BaseModel):
     session_id: str
     message: str = Field(min_length=1)
     audio_features: Optional[AudioFeatures] = None
     region: Optional[AudioRegion] = None
     history: list[ChatHistoryItem] = []
+    file_type: Optional[FileType] = None
+    song_bpm: Optional[float] = Field(default=None, ge=20, le=300)  # the tempo the user says the song is
+    session_tracks: list[TrackSummary] = Field(default=[], max_length=MAX_SESSION_TRACKS)  # every track in the song
+    focused_track: Optional[str] = Field(default=None, max_length=255)  # which of them audio_features describes

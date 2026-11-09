@@ -14,12 +14,26 @@ export interface FrequencyProfile {
   high_energy: number;
 }
 
+export interface BandLevel {
+  name: string;
+  low_hz: number;
+  high_hz: number;
+  level_db: number;
+}
+
+export interface PeakMoment {
+  timestamp: number;
+  level_dbfs: number;
+}
+
 export interface AudioFeatures {
   session_id: string;
   duration: number;
   sample_rate: number;
   bpm: number | null;
+  bpm_confident: boolean;
   key: string | null;
+  key_confident: boolean;
   loudness_lufs: number | null;
   peak_dbfs: number | null;
   dynamic_range_db: number | null;
@@ -28,6 +42,10 @@ export interface AudioFeatures {
   timing_checked: boolean;
   timing_issues: TimingIssue[];
   frequency_profile: FrequencyProfile | null;
+  band_levels: BandLevel[];
+  prominent_frequencies_hz: number[];
+  peak_moments: PeakMoment[];
+  active_ranges: AudioRegion[];
 }
 
 export interface GainEdit {
@@ -116,10 +134,29 @@ export interface ChatMessage {
   proposalRegion?: AudioRegion | null;
 }
 
+export type FileType = "track" | "mix" | "master";
+
+export interface TrackSummary {
+  name: string;
+  features: AudioFeatures;
+}
+
+/** What the user has told us about the audio, which analysis can't work out reliably. */
+export interface AudioContext {
+  fileType: FileType | null;
+  songBpm: number | null;
+  sessionTracks: TrackSummary[];
+  focusedTrack: string | null;
+}
+
 export interface ChatRequest {
   session_id: string;
   message: string;
   audio_features: AudioFeatures | null;
   region: AudioRegion | null;
   history: Array<{ role: string; content: string }>;
+  file_type: FileType | null;
+  song_bpm: number | null;
+  session_tracks: TrackSummary[];
+  focused_track: string | null;
 }

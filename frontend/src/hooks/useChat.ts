@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { v4 as uuidv4 } from "uuid";
-import { ChatMessage, AudioFeatures, AudioRegion } from "../types";
+import { AudioContext, ChatMessage, AudioFeatures, AudioRegion } from "../types";
 import { streamChat } from "../utils/api";
 
 export function useChat(sessionId: string) {
@@ -13,7 +13,8 @@ export function useChat(sessionId: string) {
       text: string,
       audioFeatures: AudioFeatures | null,
       region: AudioRegion | null,
-      file: File | null
+      file: File | null,
+      context: AudioContext
     ) => {
       if (!text.trim() || isStreaming) return;
 
@@ -52,6 +53,10 @@ export function useChat(sessionId: string) {
           audio_features: audioFeatures,
           region,
           history,
+          file_type: context.fileType,
+          song_bpm: context.songBpm,
+          session_tracks: context.sessionTracks,
+          focused_track: context.focusedTrack,
         });
 
         for await (const event of stream) {

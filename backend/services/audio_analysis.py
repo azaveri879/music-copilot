@@ -6,9 +6,9 @@ import librosa
 import numpy as np
 import pyloudnorm
 import soundfile as sf
-from scipy.signal import medfilt
+from scipy.signal import find_peaks, medfilt
 
-from models.schemas import AudioFeatures, FrequencyProfile, TimingIssue
+from models.schemas import AudioFeatures, AudioRegion, BandLevel, FrequencyProfile, PeakMoment, TimingIssue
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,36 @@ MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 
 
 MIN_REGION_SECONDS = 0.1
 SILENCE_RMS = 1e-5
+# Frames this far below the loudest moment are gaps, tails or noise rather than the part
+# itself. Exported tracks are mostly silence, which would otherwise skew these measurements.
+ACTIVE_LEVEL_GATE_DB = 40.0
+# Below this correlation with the best-matching key profile, the audio doesn't clearly suggest a key.
+KEY_MIN_CORRELATION = 0.6
+
+SPECTRUM_BANDS = [
+    ("sub", 20.0, 60.0),
+    ("bass", 60.0, 120.0),
+    ("low-mid", 120.0, 350.0),
+    ("mid", 350.0, 1500.0),
+    ("presence", 1500.0, 5000.0),
+    ("air", 5000.0, 20000.0),
+]
+SPECTRUM_N_FFT = 8192  # fine enough to separate neighboring low frequencies
+SPECTRUM_HOP = 2048
+PROMINENT_RANGE_HZ = (80.0, 1000.0)
+PROMINENT_SMOOTHING_BINS = 5
+PROMINENT_MIN_SPACING_HZ = 25.0
+PROMINENT_MIN_RISE_DB = 3.0  # above its surroundings, so a smooth spectrum reports nothing
+MAX_PROMINENT_FREQUENCIES = 4
+
+PEAK_BLOCK = 256
+PEAK_MIN_SPACING_S = 0.5
+PEAK_WITHIN_DB = 6.0  # only moments close to the loudest one explain the peak level
+MAX_PEAK_MOMENTS = 5
+
+ACTIVE_HOP = 512
+ACTIVE_MERGE_GAP_S = 1.0  # shorter pauses are part of the same phrase
+ACTIVE_MIN_RANGE_S = 0.25
 
 # Positions within a beat that count as "on the grid": straight 16ths plus
 # triplets, so swung or triplet parts aren't reported as mistimed.
@@ -75,14 +105,29 @@ def is_silent(y: np.ndarray) -> bool:
     return y.size == 0 or float(np.sqrt(np.mean(y**2))) < SILENCE_RMS
 
 
-def detect_key(y: np.ndarray, sr: int) -> str | None:
-    """Estimate the musical key with the Krumhansl-Schmuckler algorithm."""
-    if is_silent(y):
-        return None
+def _within_active_gate(levels_db: np.ndarray) -> np.ndarray:
+    """Mask of the frames close enough to the loudest moment to count as the part playing."""
+    return levels_db > levels_db.max() - ACTIVE_LEVEL_GATE_DB
 
-    chroma_mean = librosa.feature.chroma_cqt(y=y, sr=sr).mean(axis=1)
+
+def detect_key(y: np.ndarray, sr: int) -> tuple[str | None, bool]:
+    """
+    Estimate the musical key with the Krumhansl-Schmuckler algorithm.
+
+    Returns the key and whether the audio points to it clearly. Each chroma frame is
+    normalized, so silent frames would count as much as real notes; only frames
+    where the part is playing are used.
+    """
+    if is_silent(y):
+        return None, False
+
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+    rms = librosa.feature.rms(y=y)[0]
+    frames = min(chroma.shape[1], rms.size)
+    active = _within_active_gate(20 * np.log10(np.maximum(rms[:frames], 1e-12)))
+    chroma_mean = chroma[:, :frames][:, active].mean(axis=1)
     if np.allclose(chroma_mean, chroma_mean[0]):
-        return None  # no pitch content to correlate against
+        return None, False  # no pitch content to correlate against
 
     best_key, best_mode, best_corr = None, None, -np.inf
     for tonic in range(12):
@@ -91,7 +136,9 @@ def detect_key(y: np.ndarray, sr: int) -> str | None:
             if corr > best_corr:
                 best_key, best_mode, best_corr = tonic, mode, corr
 
-    return f"{NOTE_NAMES[best_key]} {best_mode}" if best_key is not None else None
+    if best_key is None:
+        return None, False
+    return f"{NOTE_NAMES[best_key]} {best_mode}", bool(best_corr >= KEY_MIN_CORRELATION)
 
 
 def detect_onsets(y: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray]:
@@ -151,22 +198,25 @@ def measure_grid_drift_ms(onsets: np.ndarray, bpm: float, subdivisions: int, pos
 
 def estimate_rhythm(
     y: np.ndarray, sr: int, onsets: np.ndarray, strengths: np.ndarray
-) -> tuple[float | None, np.ndarray, bool]:
+) -> tuple[float | None, np.ndarray, bool, bool]:
     """
-    Return the tempo in BPM, the beat times in seconds, and whether the tempo is steady.
+    Return the tempo in BPM, the beat times in seconds, whether the tempo is steady,
+    and whether the BPM itself can be trusted.
 
     The beat tracker follows the attacks it hears, so its beats wander even on a
     perfectly steady part. It only picks the rough tempo and which subdivision the
     beat falls on. When the onsets fit one constant tempo, the beats come from that.
+    Without that fit, the BPM is only the tracker's guess. Sparse parts often land on
+    a tempo unrelated to the song.
     """
     if is_silent(y):
-        return None, np.array([]), False
+        return None, np.array([]), False, False
 
     tempo, tracked_beats = librosa.beat.beat_track(y=y, sr=sr, units="time")
     # librosa returns tempo as a one-element array, which float() rejects on current NumPy.
     tracked_bpm = float(np.atleast_1d(tempo)[0])
     if tracked_bpm <= 0:
-        return None, tracked_beats, False
+        return None, tracked_beats, False, False
     while tracked_bpm > MAX_PLAUSIBLE_BPM:
         tracked_bpm /= 2
 
@@ -174,18 +224,18 @@ def estimate_rhythm(
     if len(strong) >= MIN_ONSETS_FOR_TEMPO_FIT and len(tracked_beats) > 0:
         fit, bpm, position, subdivisions = _fit_constant_tempo(strong, tracked_bpm)
         if fit < TEMPO_FIT_MIN_TIMES_CHANCE / np.sqrt(len(strong)):
-            return round(tracked_bpm, 1), tracked_beats, False
+            return round(tracked_bpm, 1), tracked_beats, False, False
         # Too much drift to judge timing against, but still a better tempo reading than the tracker's.
         if measure_grid_drift_ms(strong, bpm, subdivisions, position) > GRID_MAX_DRIFT_MS:
-            return round(bpm, 1), tracked_beats, False
+            return round(bpm, 1), tracked_beats, False, True
 
         beat = 60 / bpm
         candidates = position + np.arange(subdivisions) * beat / subdivisions
         wrapped = np.abs((tracked_beats[None, :] - candidates[:, None] + beat / 2) % beat - beat / 2)
         first_beat = candidates[np.median(wrapped, axis=1).argmin()] % beat
-        return round(bpm, 1), np.arange(first_beat, y.size / sr, beat), True
+        return round(bpm, 1), np.arange(first_beat, y.size / sr, beat), True, True
 
-    return round(tracked_bpm, 1), tracked_beats, False
+    return round(tracked_bpm, 1), tracked_beats, False, False
 
 
 def find_exact_loop_period(y: np.ndarray, sr: int) -> float | None:
@@ -320,7 +370,12 @@ def compute_peak_dbfs(y: np.ndarray) -> float | None:
 
 
 def compute_dynamic_range(y: np.ndarray) -> float | None:
-    """Spread between loud and quiet passages: 95th minus 10th percentile of short-term level."""
+    """
+    Spread between loud and quiet passages: 95th minus 10th percentile of short-term level.
+
+    Only covers moments where the part is playing, so the gaps in an exported track
+    don't read as dynamics.
+    """
     if is_silent(y):
         return None
 
@@ -328,6 +383,7 @@ def compute_dynamic_range(y: np.ndarray) -> float | None:
     levels = 20 * np.log10(rms[rms > SILENCE_RMS])
     if levels.size == 0:
         return None
+    levels = levels[_within_active_gate(levels)]
     return round(float(np.percentile(levels, 95) - np.percentile(levels, 10)), 1)
 
 
@@ -344,6 +400,101 @@ def compute_frequency_profile(y: np.ndarray, sr: int) -> FrequencyProfile | None
         mid_energy=round(float(stft[(freqs >= 250) & (freqs < 4000)].sum() / total), 3),
         high_energy=round(float(stft[freqs >= 4000].sum() / total), 3),
     )
+
+
+def compute_spectrum_detail(y: np.ndarray, sr: int) -> tuple[list[BandLevel], list[float]]:
+    """
+    Level of each band relative to the loudest one, and the frequencies that stand out.
+
+    Uses power, while the part is playing. These show whether there's anything in a
+    range to cut, and where in the low-mids energy concentrates.
+    """
+    if is_silent(y):
+        return [], []
+
+    power = np.abs(librosa.stft(y, n_fft=SPECTRUM_N_FFT, hop_length=SPECTRUM_HOP)) ** 2
+    active = _within_active_gate(10 * np.log10(np.maximum(power.sum(axis=0), 1e-20)))
+    spectrum = power[:, active].sum(axis=1)
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=SPECTRUM_N_FFT)
+
+    bands = [(name, low, high, spectrum[(freqs >= low) & (freqs < high)]) for name, low, high in SPECTRUM_BANDS]
+    bands = [(name, low, high, float(bins.sum())) for name, low, high, bins in bands if bins.size]
+    loudest = max(energy for *_, energy in bands)
+    if loudest <= 0:
+        return [], []
+    levels = [
+        BandLevel(
+            name=name, low_hz=low, high_hz=high, level_db=round(10 * np.log10(max(energy / loudest, 1e-12)), 1)
+        )
+        for name, low, high, energy in bands
+    ]
+
+    in_range = (freqs >= PROMINENT_RANGE_HZ[0]) & (freqs <= PROMINENT_RANGE_HZ[1])
+    kernel = np.ones(PROMINENT_SMOOTHING_BINS) / PROMINENT_SMOOTHING_BINS
+    smoothed = 10 * np.log10(np.maximum(np.convolve(spectrum, kernel, "same")[in_range], 1e-20))
+    bin_hz = sr / SPECTRUM_N_FFT
+    peaks, _ = find_peaks(
+        smoothed, distance=max(1, round(PROMINENT_MIN_SPACING_HZ / bin_hz)), prominence=PROMINENT_MIN_RISE_DB
+    )
+    strongest = peaks[np.argsort(smoothed[peaks])[::-1][:MAX_PROMINENT_FREQUENCIES]]
+    return levels, sorted(round(float(f)) for f in freqs[in_range][strongest])
+
+
+def find_peak_moments(y: np.ndarray, sr: int, start: float = 0.0) -> list[PeakMoment]:
+    """
+    The moments that set the peak level, in time order, as positions in the file.
+
+    `y` is (samples,) or (channels, samples), and `start` is where it begins in the file.
+    """
+    if is_silent(y):
+        return []
+
+    envelope = np.abs(np.atleast_2d(y)).max(axis=0)
+    blocks = envelope.size // PEAK_BLOCK
+    if blocks == 0:
+        return []
+    levels = envelope[: blocks * PEAK_BLOCK].reshape(blocks, PEAK_BLOCK).max(axis=1)
+    if levels.max() <= 0:
+        return []
+
+    # Padding lets a peak in the very first or last block be found.
+    distance = max(1, round(PEAK_MIN_SPACING_S * sr / PEAK_BLOCK))
+    peaks, _ = find_peaks(np.concatenate([[0.0], levels, [0.0]]), distance=distance)
+    peaks = peaks - 1
+    threshold = levels.max() * 10 ** (-PEAK_WITHIN_DB / 20)
+    peaks = peaks[levels[peaks] >= threshold]
+    strongest = peaks[np.argsort(levels[peaks])[::-1][:MAX_PEAK_MOMENTS]]
+    return [
+        PeakMoment(
+            timestamp=round(start + int(i) * PEAK_BLOCK / sr, 2),
+            level_dbfs=round(20 * np.log10(float(levels[i])), 1),  # audio is float32, which won't round cleanly
+        )
+        for i in sorted(strongest)
+    ]
+
+
+def find_active_ranges(y: np.ndarray, sr: int, start: float = 0.0) -> list[AudioRegion]:
+    """When the part is playing, as positions in the file. `start` is where `y` begins in the file."""
+    if is_silent(y):
+        return []
+
+    rms = librosa.feature.rms(y=y, hop_length=ACTIVE_HOP)[0]
+    active = _within_active_gate(20 * np.log10(np.maximum(rms, 1e-12)))
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], active.astype(int), [0]])))
+
+    ranges: list[list[float]] = []
+    for on, off in zip(edges[::2], edges[1::2]):
+        begin, end = float(on) * ACTIVE_HOP / sr, min(float(off) * ACTIVE_HOP / sr, y.size / sr)
+        if ranges and begin - ranges[-1][1] <= ACTIVE_MERGE_GAP_S:
+            ranges[-1][1] = end
+        else:
+            ranges.append([begin, end])
+
+    return [
+        AudioRegion(start=round(start + begin, 2), end=round(start + end, 2))
+        for begin, end in ranges
+        if end - begin >= ACTIVE_MIN_RANGE_S
+    ]
 
 
 def analyze_audio(
@@ -380,7 +531,8 @@ def analyze_audio(
     mono_region = librosa.to_mono(region)
 
     onsets, strengths = detect_onsets(mono_full, sr) if not is_silent(mono_full) else (np.array([]), np.array([]))
-    bpm, beat_times, tempo_is_steady = estimate_rhythm(mono_full, sr, onsets, strengths)
+    bpm, beat_times, tempo_is_steady, bpm_confident = estimate_rhythm(mono_full, sr, onsets, strengths)
+    key, key_confident = detect_key(mono_region, sr)
     # Without a steady tempo there's no reliable grid, so timing can't be judged.
     timing_issues = (
         detect_timing_issues(onsets, strengths, beat_times, start, end, find_exact_loop_period(mono_full, sr))
@@ -393,12 +545,16 @@ def analyze_audio(
         centroid = round(float(librosa.feature.spectral_centroid(y=mono_region, sr=sr).mean()), 1)
         onset_strength = round(float(librosa.onset.onset_strength(y=mono_region, sr=sr).mean()), 4)
 
+    band_levels, prominent_frequencies = compute_spectrum_detail(mono_region, sr)
+
     return AudioFeatures(
         session_id=session_id or str(uuid.uuid4()),
         duration=round(mono_region.size / sr, 2),
         sample_rate=sr,
         bpm=bpm,
-        key=detect_key(mono_region, sr),
+        bpm_confident=bpm_confident,
+        key=key,
+        key_confident=key_confident,
         loudness_lufs=compute_loudness_lufs(region, sr),
         peak_dbfs=compute_peak_dbfs(region),
         dynamic_range_db=compute_dynamic_range(mono_region),
@@ -407,4 +563,8 @@ def analyze_audio(
         timing_checked=tempo_is_steady,
         timing_issues=timing_issues,
         frequency_profile=compute_frequency_profile(mono_region, sr),
+        band_levels=band_levels,
+        prominent_frequencies_hz=prominent_frequencies,
+        peak_moments=find_peak_moments(region, sr, start),
+        active_ranges=find_active_ranges(mono_region, sr, start),
     )

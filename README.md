@@ -320,10 +320,13 @@ Accepts an audio file upload. Returns structured audio features.
 - `file`: audio file (`.wav`, `.mp3`, `.aiff`, `.aif`, `.flac`)
 - `start_time` *(optional)*: float, start of region in seconds
 - `end_time` *(optional)*: float, end of region in seconds
+- `remember` *(optional)*: boolean, default `true`. `false` skips holding the audio for measuring proposed edits, for analyzing many tracks at once
 
 `timing_issues` are candidates to check by ear. They're measured against a grid at the single tempo that best fits the track. If no steady tempo fits, `timing_checked` is `false` and no issues are reported, rather than guessing against an unreliable grid. Notes near the midpoint between grid lines and unusually quiet attacks are left out, and an exact digital loop reports each spot once.
 
 With a region, `bpm` and the beat grid come from the whole track. `timing_issues` are limited to the region, with timestamps as positions in the file. All other fields describe the region. Fields that can't be measured, such as loudness on a clip under 400ms or anything on silence, are `null`.
+
+`bpm_confident` and `key_confident` are `false` when a reading is only a guess, which is common on sparse parts. `bpm` and `key` still hold that guess, but the app doesn't show it or pass it to Claude. Key and `dynamic_range_db` ignore moments more than 40 dB below the loudest point, so gaps in an exported track don't skew them.
 
 **Errors:** `400` for an unsupported type, undecodable audio or an invalid region; `413` for a file over `MAX_FILE_SIZE_MB`.
 
@@ -334,7 +337,9 @@ With a region, `bpm` and the beat grid come from the whole track. `timing_issues
   "duration": 42.3,
   "sample_rate": 44100,
   "bpm": 92.4,
+  "bpm_confident": true,
   "key": "C minor",
+  "key_confident": true,
   "loudness_lufs": -14.2,
   "peak_dbfs": -0.8,
   "dynamic_range_db": 8.1,
@@ -348,9 +353,21 @@ With a region, `bpm` and the beat grid come from the whole track. `timing_issues
     "low_energy": 0.42,
     "mid_energy": 0.35,
     "high_energy": 0.23
-  }
+  },
+  "band_levels": [
+    { "name": "sub", "low_hz": 20, "high_hz": 60, "level_db": -31.4 }
+  ],
+  "prominent_frequencies_hz": [158, 188, 305, 621],
+  "peak_moments": [
+    { "timestamp": 125.31, "level_dbfs": -0.1 }
+  ],
+  "active_ranges": [
+    { "start": 50.3, "end": 62.1 }
+  ]
 }
 ```
+
+`band_levels` covers six bands from 20 Hz to 20 kHz, in dB relative to the loudest band. `prominent_frequencies_hz` lists where energy stands out between 80 Hz and 1 kHz, which may just be the notes played. `peak_moments` lists up to five moments within 6 dB of the loudest one, as positions in the file. These all describe the selected region when there is one.
 
 ---
 
@@ -413,9 +430,17 @@ Sends a user message and streams back an AI response using Server-Sent Events (S
   "history": [
     { "role": "user", "content": "..." },
     { "role": "assistant", "content": "..." }
-  ]
+  ],
+  "file_type": "track",
+  "song_bpm": 98,
+  "session_tracks": [
+    { "name": "Guitar", "features": { ... } }
+  ],
+  "focused_track": "Guitar"
 }
 ```
+
+`file_type` (`track`, `mix` or `master`) and `song_bpm` (20–300) are optional. They're what the user told the app about the audio, and `song_bpm` replaces the detected tempo and adds bar numbers to positions. `session_tracks` (up to 40) gives Claude every track in the song, and `focused_track` names the one `audio_features` describes. With no `audio_features`, the question is about the whole song and Claude can't propose edits.
 
 **Response:** `text/event-stream`
 ```
@@ -441,7 +466,7 @@ Failures after the stream has started arrive as `data: {"type": "error", "conten
 - [x] Session context (conversation memory within a session)
 
 ### v2 — Deeper Analysis
-- [ ] Stem-aware analysis (upload individual tracks)
+- [x] Stem-aware analysis (upload individual tracks)
 - [ ] Reference track upload ("make mine sound like this")
 - [ ] Pitch correction guidance (detect off-key notes with timestamps)
 - [ ] Clip gain and automation suggestions
