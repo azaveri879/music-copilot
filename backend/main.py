@@ -25,6 +25,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Edit-Report"],
 )
 
 app.include_router(analyze_router)

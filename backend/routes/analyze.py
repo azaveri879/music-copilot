@@ -1,3 +1,5 @@
+import dataclasses
+import json
 import logging
 import os
 import tempfile
@@ -6,7 +8,11 @@ import uuid
 from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
-from models.schemas import AudioFeatures
+from pydantic import ValidationError
+
+from models.schemas import AudioEditList, AudioFeatures, AudioRegion
+from services import audio_store
+from services.audio_editing import EditError, apply_edits, estimate_edits
 from services.audio_analysis import AudioDecodeError, InvalidRegionError, analyze_audio, to_playable_wav
 
 logger = logging.getLogger(__name__)
@@ -42,6 +48,60 @@ async def preview_endpoint(file: UploadFile = File(...)):
     return Response(content=wav, media_type="audio/wav")
 
 
+def parse_edit_request(edits: str, start_time: float | None, end_time: float | None):
+    try:
+        parsed = AudioEditList.validate_json(edits)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail="These edits aren't valid.") from exc
+    region = AudioRegion(start=start_time, end=end_time) if start_time is not None and end_time is not None else None
+    return parsed, region
+
+
+@router.post("/edit/estimate")
+async def estimate_endpoint(
+    file: UploadFile = File(...),
+    edits: str = Form(...),
+    start_time: float | None = Form(None),
+    end_time: float | None = Form(None),
+):
+    """Measure what edits would do to loudness and peak level, without keeping the result."""
+    content, _ = await read_upload(file)
+    parsed, region = parse_edit_request(edits, start_time, end_time)
+    try:
+        return dataclasses.asdict(await run_in_threadpool(estimate_edits, content, parsed, region))
+    except (AudioDecodeError, InvalidRegionError, EditError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Edit estimate failed")
+        raise HTTPException(status_code=500, detail="Estimating the edits failed unexpectedly.") from exc
+
+
+@router.post("/edit")
+async def edit_endpoint(
+    file: UploadFile = File(...),
+    edits: str = Form(...),
+    start_time: float | None = Form(None),
+    end_time: float | None = Form(None),
+):
+    """Apply edits to a copy of the audio. Returns a WAV, with a summary in the X-Edit-Report header."""
+    content, _ = await read_upload(file)
+    parsed, region = parse_edit_request(edits, start_time, end_time)
+
+    try:
+        wav, report = await run_in_threadpool(apply_edits, content, parsed, region)
+    except (AudioDecodeError, InvalidRegionError, EditError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Audio edit failed")
+        raise HTTPException(status_code=500, detail="Applying the edits failed unexpectedly.") from exc
+
+    return Response(
+        content=wav,
+        media_type="audio/wav",
+        headers={"X-Edit-Report": json.dumps(dataclasses.asdict(report))},
+    )
+
+
 @router.post("/analyze", response_model=AudioFeatures)
 async def analyze_endpoint(
     file: UploadFile = File(...),
@@ -54,15 +114,18 @@ async def analyze_endpoint(
         tmp.write(content)
         tmp_path = tmp.name
 
+    session_id = str(uuid.uuid4())
     try:
         # Analysis is CPU-bound; a thread keeps the server responsive to other requests.
-        return await run_in_threadpool(
+        features = await run_in_threadpool(
             analyze_audio,
             audio_path=tmp_path,
             start_time=start_time,
             end_time=end_time,
-            session_id=str(uuid.uuid4()),
+            session_id=session_id,
         )
+        audio_store.remember(session_id, content)
+        return features
     except (AudioDecodeError, InvalidRegionError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

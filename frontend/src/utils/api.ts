@@ -1,4 +1,4 @@
-import { AudioFeatures, ChatRequest } from "../types";
+import { AudioEdit, AudioFeatures, AudioRegion, ChatRequest, ChatStreamEvent, EditEstimate, EditReport } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const UNREACHABLE = `Can't reach the backend at ${API_BASE}. Is it running?`;
@@ -43,7 +43,38 @@ export async function fetchPlayableAudio(file: File, signal: AbortSignal): Promi
   return res.blob();
 }
 
-export async function* streamChat(request: ChatRequest): AsyncGenerator<string> {
+function editForm(file: File, edits: AudioEdit[], region: AudioRegion | null) {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("edits", JSON.stringify(edits));
+  if (region) {
+    formData.append("start_time", String(region.start));
+    formData.append("end_time", String(region.end));
+  }
+  return formData;
+}
+
+export async function estimateEdits(
+  file: File,
+  edits: AudioEdit[],
+  region: AudioRegion | null,
+  signal: AbortSignal
+): Promise<EditEstimate> {
+  const res = await post("/edit/estimate", { body: editForm(file, edits, region), signal }, "Couldn't estimate these edits");
+  return res.json();
+}
+
+export async function applyEdits(
+  file: File,
+  edits: AudioEdit[],
+  region: AudioRegion | null
+): Promise<{ blob: Blob; report: EditReport }> {
+  const formData = editForm(file, edits, region);
+  const res = await post("/edit", { body: formData }, "Applying the edits failed");
+  return { blob: await res.blob(), report: JSON.parse(res.headers.get("X-Edit-Report") ?? "{}") };
+}
+
+export async function* streamChat(request: ChatRequest): AsyncGenerator<ChatStreamEvent> {
   const res = await post(
     "/chat",
     {
@@ -70,7 +101,8 @@ export async function* streamChat(request: ChatRequest): AsyncGenerator<string> 
     for (const line of lines) {
       if (!line.startsWith("data: ")) continue;
       const event = JSON.parse(line.slice(6));
-      if (event.type === "delta") yield event.content;
+      if (event.type === "delta") yield { type: "text", text: event.content };
+      else if (event.type === "proposal") yield { type: "proposal", proposal: event.proposal };
       else if (event.type === "error") throw new Error(event.content);
       else if (event.type === "done") return;
     }

@@ -1,6 +1,7 @@
 import { useRef, useEffect, useState, KeyboardEvent } from "react";
 import { ChatMessage, AudioFeatures, AudioRegion } from "../types";
 import { formatTime } from "../utils/format";
+import { ProposalHandlers } from "./EditProposalCard";
 import { MessageBubble } from "./MessageBubble";
 import { RegionInfo } from "./RegionInfo";
 
@@ -13,6 +14,7 @@ interface ChatPanelProps {
   isAnalyzingRegion: boolean;
   onClearRegion: () => void;
   onSend: (text: string) => void;
+  proposalHandlers: ProposalHandlers;
 }
 
 export function ChatPanel({
@@ -24,6 +26,7 @@ export function ChatPanel({
   isAnalyzingRegion,
   onClearRegion,
   onSend,
+  proposalHandlers,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -84,7 +87,7 @@ export function ChatPanel({
           </div>
         )}
         {messages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} />
+          <MessageBubble key={msg.id} message={msg} proposalHandlers={proposalHandlers} />
         ))}
         {error && (
           <div className="text-xs text-red-400 bg-red-500/10 rounded-lg px-3 py-2">

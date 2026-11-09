@@ -1,8 +1,10 @@
 import { CSSProperties, useCallback, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { ChatPanel } from "./components/ChatPanel";
+import { EditResultPanel } from "./components/EditResultPanel";
 import { WaveformPlayer } from "./components/WaveformPlayer";
 import { useAudioAnalysis } from "./hooks/useAudioAnalysis";
+import { useAudioEdit } from "./hooks/useAudioEdit";
 import { useChat } from "./hooks/useChat";
 import { useResizableWidth } from "./hooks/useResizableWidth";
 import { AudioRegion } from "./types";
@@ -22,6 +24,7 @@ export default function App() {
   const { width: chatWidth, handleProps: chatResizeProps } = useResizableWidth();
 
   const audioFeatures = regionFeatures ?? trackFeatures;
+  const edit = useAudioEdit(file, trackFeatures);
 
   const handleFile = useCallback((f: File | undefined) => {
     if (!f) return;
@@ -36,8 +39,8 @@ export default function App() {
 
   const handleSend = useCallback(
     // If region analysis failed, the answer is about the full track, so don't label it as the region.
-    (text: string) => sendMessage(text, audioFeatures, regionFeatures ? selectedRegion : null),
-    [sendMessage, audioFeatures, regionFeatures, selectedRegion]
+    (text: string) => sendMessage(text, audioFeatures, regionFeatures ? selectedRegion : null, file),
+    [sendMessage, audioFeatures, regionFeatures, selectedRegion, file]
   );
 
   const error = fileError ?? analysisError;
@@ -144,7 +147,22 @@ export default function App() {
           )}
 
           {/* Waveform */}
-          <WaveformPlayer file={file} region={selectedRegion} onRegionChange={setSelectedRegion} />
+          <WaveformPlayer
+            file={file}
+            editedAudio={edit.listeningToEdited ? edit.result?.blob ?? null : null}
+            region={selectedRegion}
+            onRegionChange={setSelectedRegion}
+          />
+
+          {edit.result && file && (
+            <EditResultPanel
+              result={edit.result}
+              fileName={file.name}
+              listeningToEdited={edit.listeningToEdited}
+              onListen={edit.setListeningToEdited}
+              onDiscard={edit.discard}
+            />
+          )}
         </div>
 
         {/* Right panel — chat */}
@@ -166,6 +184,13 @@ export default function App() {
             isAnalyzingRegion={isAnalyzingRegion}
             onClearRegion={() => setSelectedRegion(null)}
             onSend={handleSend}
+            proposalHandlers={{
+              currentFile: file,
+              isApplying: edit.isApplying,
+              error: edit.error,
+              applied: edit.result,
+              onApply: edit.apply,
+            }}
           />
         </div>
       </div>
