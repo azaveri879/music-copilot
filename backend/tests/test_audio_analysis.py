@@ -78,7 +78,43 @@ def test_short_region_still_reports_track_tempo(write_wav, click_track):
 )
 def test_detects_key(write_wav, chords, expected):
     y = np.concatenate([chord(c, 2.0) for c in chords] * 2)
-    assert analyze_audio(write_wav(y)).key == expected
+    features = analyze_audio(write_wav(y))
+    assert features.key == expected
+    assert features.key_confident
+
+
+def noise_floor(seconds: float) -> np.ndarray:
+    return 1e-4 * np.random.default_rng(0).standard_normal(int(seconds * SR))
+
+
+def test_key_ignores_the_gaps_between_phrases(write_wav):
+    phrases = [chord(c, 2.0) for c in [[261.63, 329.63, 392.0], [349.23, 440.0, 523.25], [392.0, 493.88, 587.33]]]
+    y = np.concatenate([part for phrase in phrases for part in (phrase, noise_floor(8.0))])
+    features = analyze_audio(write_wav(y))
+    assert features.key == "C major"
+    assert features.key_confident
+
+
+def test_noise_has_no_confident_key(write_wav):
+    y = 0.2 * np.random.default_rng(1).standard_normal(8 * SR)
+    assert not analyze_audio(write_wav(y)).key_confident
+
+
+def test_steady_part_has_a_confident_tempo(write_wav, click_track):
+    assert analyze_audio(write_wav(click_track())).bpm_confident
+
+
+def test_scattered_notes_have_no_confident_tempo(write_wav):
+    y = np.zeros(30 * SR)
+    for time in np.sort(np.random.default_rng(2).uniform(0.5, 29.0, 40)):
+        click(y, float(time))
+    assert not analyze_audio(write_wav(y)).bpm_confident
+
+
+def test_silent_file_has_no_confident_readings(write_wav):
+    features = analyze_audio(write_wav(np.zeros(4 * SR)))
+    assert not features.bpm_confident
+    assert not features.key_confident
 
 
 def test_region_key_describes_the_region_not_the_track(write_wav):
@@ -106,6 +142,11 @@ def test_dynamic_range_separates_steady_from_dynamic_audio(write_wav):
     ).dynamic_range_db
     assert steady < 1
     assert dynamic == pytest.approx(20, abs=2)
+
+
+def test_dynamic_range_ignores_the_gaps_between_phrases(write_wav):
+    y = np.concatenate([tone(440, 2.0, 0.5), noise_floor(2.0)] * 3)
+    assert analyze_audio(write_wav(y)).dynamic_range_db < 3
 
 
 def test_frequency_profile_follows_the_content(write_wav):

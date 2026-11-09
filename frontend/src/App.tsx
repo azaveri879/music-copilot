@@ -7,15 +7,25 @@ import { useAudioAnalysis } from "./hooks/useAudioAnalysis";
 import { useAudioEdit } from "./hooks/useAudioEdit";
 import { useChat } from "./hooks/useChat";
 import { useResizableWidth } from "./hooks/useResizableWidth";
-import { AudioRegion } from "./types";
+import { AudioRegion, FileType } from "./types";
 import { formatTime } from "./utils/format";
 
 const SESSION_ID = uuidv4();
+
+const FILE_TYPES: { value: FileType; label: string }[] = [
+  { value: "track", label: "Single track" },
+  { value: "mix", label: "Full mix" },
+  { value: "master", label: "Master" },
+];
+const MIN_SONG_BPM = 20;
+const MAX_SONG_BPM = 300;
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null);
   const [selectedRegion, setSelectedRegion] = useState<AudioRegion | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [fileType, setFileType] = useState<FileType | null>(null);
+  const [songBpmText, setSongBpmText] = useState(""); // kept across files, since they're often from one song
 
   const { trackFeatures, regionFeatures, isAnalyzingTrack, isAnalyzingRegion, error: analysisError } =
     useAudioAnalysis(file, selectedRegion);
@@ -26,6 +36,10 @@ export default function App() {
   const audioFeatures = regionFeatures ?? trackFeatures;
   const edit = useAudioEdit(file, trackFeatures);
 
+  const songBpm = parseSongBpm(songBpmText);
+  const detectedBpm = audioFeatures?.bpm_confident ? audioFeatures.bpm : null;
+  const musicalKey = audioFeatures?.key_confident ? audioFeatures.key : null;
+
   const handleFile = useCallback((f: File | undefined) => {
     if (!f) return;
     if (!isSupportedAudio(f)) {
@@ -34,13 +48,15 @@ export default function App() {
     }
     setFileError(null);
     setFile(f);
+    setFileType(null);
     setSelectedRegion(null);
   }, []);
 
   const handleSend = useCallback(
     // If region analysis failed, the answer is about the full track, so don't label it as the region.
-    (text: string) => sendMessage(text, audioFeatures, regionFeatures ? selectedRegion : null, file),
-    [sendMessage, audioFeatures, regionFeatures, selectedRegion, file]
+    (text: string) =>
+      sendMessage(text, audioFeatures, regionFeatures ? selectedRegion : null, file, { fileType, songBpm }),
+    [sendMessage, audioFeatures, regionFeatures, selectedRegion, file, fileType, songBpm]
   );
 
   const error = fileError ?? analysisError;
@@ -94,6 +110,28 @@ export default function App() {
             )}
           </div>
 
+          {/* What the file is, which analysis can't tell */}
+          {file && (
+            <div role="group" aria-label="What is this file?" className="flex flex-wrap items-center gap-2 px-1">
+              <span className="text-xs text-gray-400">What is this?</span>
+              {FILE_TYPES.map(({ value, label }) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={fileType === value}
+                  onClick={() => setFileType(value)}
+                  className={`text-xs px-3 py-1 rounded-full border transition-colors ${
+                    fileType === value
+                      ? "bg-indigo-600 border-indigo-600 text-white"
+                      : "border-gray-700 text-gray-300 hover:border-indigo-500"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+
           {/* Analysis status */}
           {isAnalyzingTrack && <div className="text-xs text-indigo-400 animate-pulse px-1">Analyzing audio…</div>}
           {error && <div className="text-xs text-red-400 bg-red-500/10 rounded-lg px-3 py-2">{error}</div>}
@@ -107,9 +145,26 @@ export default function App() {
                   : "Full track"}
               </p>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-gray-900 rounded-lg px-3 py-2">
+                  <label htmlFor="song-bpm" className="block text-xs text-gray-500">
+                    BPM
+                  </label>
+                  <input
+                    id="song-bpm"
+                    type="number"
+                    min={MIN_SONG_BPM}
+                    max={MAX_SONG_BPM}
+                    value={songBpmText}
+                    onChange={(e) => setSongBpmText(e.target.value)}
+                    placeholder={detectedBpm !== null ? String(Math.round(detectedBpm)) : "Enter tempo"}
+                    title="Type your song's tempo to use it instead of the detected one"
+                    className={`w-full bg-transparent text-sm font-medium text-gray-200 focus:outline-none ${
+                      detectedBpm !== null ? "placeholder:text-gray-200" : "placeholder:text-gray-500"
+                    }`}
+                  />
+                </div>
                 {[
-                  { label: "BPM", value: audioFeatures.bpm !== null ? Math.round(audioFeatures.bpm) : "—" },
-                  { label: "Key", value: audioFeatures.key ?? "—" },
+                  { label: "Key", value: audioFeatures.key === null ? "—" : musicalKey ?? "Unclear" },
                   {
                     label: "Loudness",
                     value: audioFeatures.loudness_lufs !== null ? `${audioFeatures.loudness_lufs.toFixed(1)} LUFS` : "—",
@@ -180,6 +235,8 @@ export default function App() {
             isStreaming={isStreaming}
             error={chatError}
             audioFeatures={audioFeatures}
+            tempo={songBpm ?? detectedBpm}
+            musicalKey={musicalKey}
             selectedRegion={selectedRegion}
             isAnalyzingRegion={isAnalyzingRegion}
             onClearRegion={() => setSelectedRegion(null)}
@@ -196,6 +253,11 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+function parseSongBpm(text: string) {
+  const bpm = Number(text);
+  return text !== "" && bpm >= MIN_SONG_BPM && bpm <= MAX_SONG_BPM ? bpm : null;
 }
 
 function isSupportedAudio(f: File) {

@@ -144,6 +144,56 @@ def test_audio_context_says_when_timing_was_not_checked():
     assert "not checked" in build_audio_context(features, None)
 
 
+def test_audio_context_withholds_unreliable_tempo_and_key():
+    features = AudioFeatures(session_id="s", duration=4.0, sample_rate=44100, bpm=165.4, key="D# minor")
+    ctx = build_audio_context(features, None)
+    assert "165" not in ctx
+    assert "D# minor" not in ctx
+    assert "**BPM:** not reliably detected" in ctx
+    assert "**Key:** not reliably detected" in ctx
+
+
+def test_audio_context_shows_confident_tempo_and_key():
+    features = AudioFeatures(
+        session_id="s", duration=4.0, sample_rate=44100, bpm=98.0, bpm_confident=True, key="A# major", key_confident=True
+    )
+    ctx = build_audio_context(features, None)
+    assert "**BPM:** 98.0" in ctx
+    assert "**Key:** A# major" in ctx
+
+
+def test_audio_context_prefers_the_users_tempo():
+    features = AudioFeatures(session_id="s", duration=4.0, sample_rate=44100, bpm=165.4, bpm_confident=True)
+    assert "**BPM:** 98 (set by the user)" in build_audio_context(features, None, song_bpm=98.0)
+
+
+@pytest.mark.parametrize(
+    "file_type,expected",
+    [("track", "single track"), ("mix", "full mix"), ("master", "finished master"), (None, "not specified")],
+)
+def test_audio_context_says_what_the_file_is(file_type, expected):
+    features = AudioFeatures(session_id="s", duration=4.0, sample_rate=44100)
+    assert expected in build_audio_context(features, None, file_type=file_type).split("\n")[1]
+
+
+def test_chat_passes_file_type_and_song_tempo_to_claude(fake_anthropic):
+    client.post("/chat", json={
+        "session_id": "s",
+        "message": "Too muddy",
+        "audio_features": {"session_id": "s", "duration": 4.0, "sample_rate": 44100},
+        "file_type": "track",
+        "song_bpm": 98,
+    })
+    content = str(fake_anthropic["requests"][0]["body"]["messages"][-1]["content"])
+    assert "single track" in content
+    assert "98 (set by the user)" in content
+
+
+@pytest.mark.parametrize("field", [{"file_type": "stem"}, {"song_bpm": 5}])
+def test_chat_rejects_invalid_context(field):
+    assert client.post("/chat", json={"session_id": "s", "message": "Hi", **field}).status_code == 422
+
+
 def test_chat_streams_deltas_then_done(fake_anthropic):
     res = client.post("/chat", json={"session_id": "s", "message": "Too muddy"})
     assert res.headers["content-type"].startswith("text/event-stream")
@@ -158,7 +208,7 @@ def test_chat_sends_model_context_and_history(fake_anthropic):
     client.post("/chat", json={
         "session_id": "s",
         "message": "Now the chorus",
-        "audio_features": {"session_id": "s", "duration": 4.0, "sample_rate": 44100, "bpm": 92.0},
+        "audio_features": {"session_id": "s", "duration": 4.0, "sample_rate": 44100, "bpm": 92.0, "bpm_confident": True},
         "region": {"start": 1.0, "end": 5.0},
         "history": [
             {"role": "user", "content": "Too muddy"},

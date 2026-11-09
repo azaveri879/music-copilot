@@ -325,6 +325,8 @@ Accepts an audio file upload. Returns structured audio features.
 
 With a region, `bpm` and the beat grid come from the whole track. `timing_issues` are limited to the region, with timestamps as positions in the file. All other fields describe the region. Fields that can't be measured, such as loudness on a clip under 400ms or anything on silence, are `null`.
 
+`bpm_confident` and `key_confident` are `false` when a reading is only a guess, which is common on sparse parts. `bpm` and `key` still hold that guess, but the app doesn't show it or pass it to Claude. Key and `dynamic_range_db` ignore moments more than 40 dB below the loudest point, so gaps in an exported track don't skew them.
+
 **Errors:** `400` for an unsupported type, undecodable audio or an invalid region; `413` for a file over `MAX_FILE_SIZE_MB`.
 
 **Response:**
@@ -334,7 +336,9 @@ With a region, `bpm` and the beat grid come from the whole track. `timing_issues
   "duration": 42.3,
   "sample_rate": 44100,
   "bpm": 92.4,
+  "bpm_confident": true,
   "key": "C minor",
+  "key_confident": true,
   "loudness_lufs": -14.2,
   "peak_dbfs": -0.8,
   "dynamic_range_db": 8.1,
@@ -413,9 +417,13 @@ Sends a user message and streams back an AI response using Server-Sent Events (S
   "history": [
     { "role": "user", "content": "..." },
     { "role": "assistant", "content": "..." }
-  ]
+  ],
+  "file_type": "track",
+  "song_bpm": 98
 }
 ```
+
+`file_type` (`track`, `mix` or `master`) and `song_bpm` (20–300) are optional. They're what the user told the app about the audio, and `song_bpm` replaces the detected tempo.
 
 **Response:** `text/event-stream`
 ```

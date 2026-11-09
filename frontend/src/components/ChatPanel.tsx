@@ -10,6 +10,8 @@ interface ChatPanelProps {
   isStreaming: boolean;
   error: string | null;
   audioFeatures: AudioFeatures | null;
+  tempo: number | null;
+  musicalKey: string | null;
   selectedRegion: AudioRegion | null;
   isAnalyzingRegion: boolean;
   onClearRegion: () => void;
@@ -22,6 +24,8 @@ export function ChatPanel({
   isStreaming,
   error,
   audioFeatures,
+  tempo,
+  musicalKey,
   selectedRegion,
   isAnalyzingRegion,
   onClearRegion,
@@ -29,6 +33,7 @@ export function ChatPanel({
   proposalHandlers,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
+  const summary = [tempo !== null ? `${Math.round(tempo)} BPM` : null, musicalKey].filter(Boolean).join(" · ");
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -57,11 +62,8 @@ export function ChatPanel({
       <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-gray-200">Copilot</span>
-          {audioFeatures && (
-            <span className="text-xs text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded-full">
-              {audioFeatures.bpm ? `${Math.round(audioFeatures.bpm)} BPM` : ""}
-              {audioFeatures.key ? ` · ${audioFeatures.key}` : ""}
-            </span>
+          {summary && (
+            <span className="text-xs text-indigo-400 bg-indigo-500/10 px-2 py-0.5 rounded-full">{summary}</span>
           )}
         </div>
         {selectedRegion && (

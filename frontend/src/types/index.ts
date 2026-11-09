@@ -19,7 +19,9 @@ export interface AudioFeatures {
   duration: number;
   sample_rate: number;
   bpm: number | null;
+  bpm_confident: boolean;
   key: string | null;
+  key_confident: boolean;
   loudness_lufs: number | null;
   peak_dbfs: number | null;
   dynamic_range_db: number | null;
@@ -116,10 +118,20 @@ export interface ChatMessage {
   proposalRegion?: AudioRegion | null;
 }
 
+export type FileType = "track" | "mix" | "master";
+
+/** What the user has told us about the audio, which analysis can't work out reliably. */
+export interface AudioContext {
+  fileType: FileType | null;
+  songBpm: number | null;
+}
+
 export interface ChatRequest {
   session_id: string;
   message: string;
   audio_features: AudioFeatures | null;
   region: AudioRegion | null;
   history: Array<{ role: string; content: string }>;
+  file_type: FileType | null;
+  song_bpm: number | null;
 }

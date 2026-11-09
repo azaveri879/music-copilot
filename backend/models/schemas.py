@@ -24,7 +24,9 @@ class AudioFeatures(BaseModel):
     duration: float
     sample_rate: int
     bpm: Optional[float] = None
+    bpm_confident: bool = False  # False when bpm is only the beat tracker's guess
     key: Optional[str] = None
+    key_confident: bool = False  # False when the audio doesn't clearly suggest a key
     loudness_lufs: Optional[float] = None
     peak_dbfs: Optional[float] = None
     dynamic_range_db: Optional[float] = None
@@ -89,9 +91,14 @@ class ChatHistoryItem(BaseModel):
     content: str
 
 
+FileType = Literal["track", "mix", "master"]
+
+
 class ChatRequest(BaseModel):
     session_id: str
     message: str = Field(min_length=1)
     audio_features: Optional[AudioFeatures] = None
     region: Optional[AudioRegion] = None
     history: list[ChatHistoryItem] = []
+    file_type: Optional[FileType] = None
+    song_bpm: Optional[float] = Field(default=None, ge=20, le=300)  # the tempo the user says the song is

@@ -8,7 +8,7 @@ import anthropic
 from fastapi.concurrency import run_in_threadpool
 from pydantic import ValidationError
 
-from models.schemas import AudioFeatures, AudioRegion, ChatHistoryItem, EditProposal
+from models.schemas import AudioFeatures, AudioRegion, ChatHistoryItem, EditProposal, FileType
 from services import audio_store
 from services.audio_analysis import AudioDecodeError, InvalidRegionError
 from services.audio_editing import EditError, estimate_edits
@@ -31,6 +31,14 @@ Your role is to bridge the gap between creative vision and technical execution �
 **Respect the user's creative intent.** When they describe a vibe — "late-night", "lo-fi", "underwater", "warm" — treat it as a real design brief, not a vague request. Translate it into concrete production decisions.
 
 **Reference the audio data, and be honest about its limits.** When the analysis shows something relevant, say so. The figures are automated estimates of a bounced file: you can't hear the audio, see the session, or tell which instrument made a sound. A detected key can land on the relative major or minor, tempo can be read at half or double time, and flagged timing issues are candidates to check by ear rather than confirmed mistakes. Never claim to have heard something the data doesn't show.
+
+**Don't lean on unreliable readings.** When tempo or key is marked as not reliably detected, don't guess at it or base advice on it. If a tempo is marked as set by the user, treat it as correct.
+
+**Work from what the file is.** The analysis says whether the file is a single track from a song, a full mix or a master.
+- Single track: advise on that part only, not on mix bus or mastering moves. Long silences are normal arrangement gaps, not a problem. You can't tell how it sits with the other tracks, so say when a choice depends on them.
+- Full mix: you can't separate the instruments, so frame fixes as changes to the mix, or as moves to try on the likely tracks in the session.
+- Master: favor small corrective moves, since it's meant to be finished, and mention when something is better fixed back in the mix.
+- Not specified: if it would change your answer, ask one short question rather than covering every case.
 
 **Respect the scope.** When the analysis is for a selected region, the tempo and beat grid come from the whole track while everything else describes that region. Timestamps are positions in the file, in seconds.
 
@@ -120,25 +128,42 @@ def get_client() -> anthropic.AsyncAnthropic:
     return anthropic.AsyncAnthropic()
 
 
-def build_audio_context(features: AudioFeatures, region: AudioRegion | None) -> str:
+FILE_TYPE_DESCRIPTIONS: dict[FileType, str] = {
+    "track": "single track from a larger song",
+    "mix": "full mix",
+    "master": "finished master",
+}
+
+
+def build_audio_context(
+    features: AudioFeatures,
+    region: AudioRegion | None,
+    file_type: FileType | None = None,
+    song_bpm: float | None = None,
+) -> str:
     """Format audio analysis data as a readable context block for the AI."""
     lines = ["## Audio Analysis"]
+    lines.append(f"**File type:** {FILE_TYPE_DESCRIPTIONS[file_type] if file_type else 'not specified'}")
 
     if region:
         lines.append(f"**Selected region:** {region.start:.1f}s – {region.end:.1f}s ({features.duration:.1f}s long)")
     else:
         lines.append(f"**Duration:** {features.duration:.1f}s (full track)")
 
-    if features.bpm is not None:
+    if song_bpm is not None:
+        lines.append(f"**BPM:** {song_bpm:g} (set by the user)")
+    elif features.bpm is not None and features.bpm_confident:
         lines.append(f"**BPM:** {features.bpm}" + (" (whole track)" if region else ""))
+    elif features.bpm is not None:
+        lines.append("**BPM:** not reliably detected")
     if features.key is not None:
-        lines.append(f"**Key:** {features.key}")
+        lines.append(f"**Key:** {features.key if features.key_confident else 'not reliably detected'}")
     if features.loudness_lufs is not None:
         lines.append(f"**Loudness:** {features.loudness_lufs} LUFS integrated")
     if features.peak_dbfs is not None:
         lines.append(f"**Peak:** {features.peak_dbfs} dBFS")
     if features.dynamic_range_db is not None:
-        lines.append(f"**Dynamic range:** {features.dynamic_range_db} dB (95th minus 10th percentile short-term level)")
+        lines.append(f"**Dynamic range:** {features.dynamic_range_db} dB (95th minus 10th percentile short-term level while the part is playing)")
     if features.spectral_centroid_mean is not None:
         lines.append(f"**Spectral centroid:** {features.spectral_centroid_mean:.0f} Hz (brightness indicator)")
 
@@ -192,6 +217,8 @@ async def stream_chat_response(
     audio_features: AudioFeatures | None,
     region: AudioRegion | None,
     history: list[ChatHistoryItem],
+    file_type: FileType | None = None,
+    song_bpm: float | None = None,
 ) -> AsyncGenerator[str | EditProposal, None]:
     """
     Stream a response from Claude, with audio analysis as context.
@@ -205,7 +232,7 @@ async def stream_chat_response(
 
     user_content = message
     if audio_features:
-        audio_ctx = build_audio_context(audio_features, region)
+        audio_ctx = build_audio_context(audio_features, region, file_type, song_bpm)
         user_content = f"{audio_ctx}\n\n---\n\n**User question:** {message}"
 
     messages.append({"role": "user", "content": user_content})
