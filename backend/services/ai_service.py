@@ -63,6 +63,7 @@ Your role is to bridge the gap between creative vision and technical execution â
 
 You may be given measurements for every track in the song.
 
+- Be exact about comparisons. A track's distance from the median isn't its lead over the other tracks, so when you say one is the loudest or quietest "by" some amount, use the gap to the next track in the ranking.
 - Compare the tracks by name: which are too loud or quiet relative to the others, and which compete, meaning they play together at similar levels and share a strongest band or frequencies. A track that's much quieter than another isn't competing with it, it's being covered by it.
 - Give level moves as specific dB changes per track. You can't change the session or render the song yourself.
 - These are exported tracks, so they may not reflect fader settings, panning or bus effects. A level difference may already be handled in the session, so say so when it would change your advice, and flag a track that's far quieter than the rest as something to check.
@@ -200,6 +201,22 @@ def _describe_track(track: TrackSummary, song_bpm: float | None) -> str:
     return f"- **{_clean_name(track.name)}:** " + "; ".join(parts)
 
 
+def _describe_ranking(tracks: list[TrackSummary]) -> str:
+    """Every track by loudness, with the gap to the next one down."""
+    ranked = sorted(
+        (t for t in tracks if t.features.loudness_lufs is not None),
+        key=lambda t: t.features.loudness_lufs,
+        reverse=True,
+    )
+    entries = []
+    for track, below in zip(ranked, ranked[1:] + [None]):
+        entry = f"{_clean_name(track.name)} {track.features.loudness_lufs}"
+        if below:
+            entry += f" ({track.features.loudness_lufs - below.features.loudness_lufs:.1f} dB above the next)"
+        entries.append(entry)
+    return ", ".join(entries)
+
+
 def _describe_pairs(tracks: list[TrackSummary]) -> list[str]:
     """Tracks that play together, closest in level first, since those are the likeliest to compete."""
     pairs = []
@@ -233,6 +250,7 @@ def build_session_context(tracks: list[TrackSummary], song_bpm: float | None = N
     loudness = [t.features.loudness_lufs for t in tracks if t.features.loudness_lufs is not None]
     if loudness:
         lines.append(f"**Median track loudness:** {median(loudness):.1f} LUFS")
+        lines.append(f"**Loudest to quietest:** {_describe_ranking(tracks)}")
     lines.extend(_describe_track(track, song_bpm) for track in tracks)
 
     pairs = _describe_pairs(tracks)

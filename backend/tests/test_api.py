@@ -555,3 +555,10 @@ def test_position_just_before_a_barline_rolls_over_to_the_next_bar():
         session_id="s", duration=4.0, sample_rate=44100, peak_moments=[{"timestamp": 14.68, "level_dbfs": -9.4}]
     )
     assert "bar 7 beat 1.0" in build_audio_context(features, None, song_bpm=98.0)
+
+
+def test_session_context_ranks_tracks_with_the_gap_to_the_next():
+    ctx = build_session_context(session(
+        track("Quiet", -39.6, []), track("Loudest", -19.7, []), track("Unknown", None, []), track("Second", -22.4, [])
+    ))
+    assert "Loudest -19.7 (2.7 dB above the next), Second -22.4 (17.2 dB above the next), Quiet -39.6\n" in ctx
